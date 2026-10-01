@@ -176,12 +176,30 @@ jobs:
     permissions:
       contents: read
       packages: read
+    outputs:
+      prior-revision: ${{ steps.prior.outputs.revision }}
     steps:
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      # A re-run (or a second run) of a commit finds the branch tag already holding an image of
+      # this commit; docker-retag then correctly leaves it alone ("already holds"), and
+      # docker-after checks that instead of a move.
+      - name: Record the branch tag's revision
+        id: prior
+        env:
+          IMAGE: ${{ needs.docker-push.outputs.image }}
+        run: |
+          set -euo pipefail
+          branch="$IMAGE:${GITHUB_REF_NAME//[^a-zA-Z0-9._-]/-}"
+          rev=$(docker buildx imagetools inspect "$branch" --format '{{json .Image}}' 2> /dev/null | jq -r '
+            (if has("config") or has("rootfs") then . else
+              ([to_entries[] | select(.key != "unknown/unknown") | .value] | first) end)
+            | .config.Labels["org.opencontainers.image.revision"] // empty' 2> /dev/null || true)
+          echo "$branch revision before retag: ${rev:-<none>}"
+          echo "revision=$rev" >> "$GITHUB_OUTPUT"
       - name: Check tags
         env:
           IMAGE: ${{ needs.docker-push.outputs.image }}
@@ -228,7 +246,7 @@ jobs:
 
   docker-after:
     name: docker (moving tag moved, no rebuild)
-    needs: [docker-push, docker-retag]
+    needs: [docker-push, docker-before, docker-retag]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -246,9 +264,17 @@ jobs:
           DIGEST: ${{ needs.docker-push.outputs.digest }}
           DEFERRED: ${{ needs.docker-push.outputs.deferred-tags }}
           MOVED: ${{ needs.docker-retag.outputs.moved }}
+          PRIOR: ${{ needs.docker-before.outputs.prior-revision }}
         run: |
-          [ "$(printf '%s' "$MOVED")" = "$(printf '%s' "$DEFERRED")" ] || { echo "::error::moved '$MOVED' != deferred '$DEFERRED'"; exit 1; }
+          if [ "$PRIOR" = "$GITHUB_SHA" ]; then
+            # Re-run of this commit: the tag already held it, so nothing may move.
+            [ -z "$MOVED" ] || { echo "::error::moved '$MOVED' although the tag already held $GITHUB_SHA"; exit 1; }
+            echo "re-run: tag already held ${GITHUB_SHA::7}, left alone"
+          else
+            [ "$(printf '%s' "$MOVED")" = "$(printf '%s' "$DEFERRED")" ] || { echo "::error::moved '$MOVED' != deferred '$DEFERRED'"; exit 1; }
+          fi
       - name: Check registry
+        if: needs.docker-before.outputs.prior-revision != github.sha
         env:
           IMAGE: ${{ needs.docker-push.outputs.image }}
           DIGEST: ${{ needs.docker-push.outputs.digest }}
