@@ -5,9 +5,9 @@
 # so they resolve to the published v1 tag, not to this commit. A change under actions/ is
 # exercised here only after v1 has been moved (see README, "发布本仓库").
 #
-# Not exercised here (they publish or deploy): docker.yml (pushes to GHCR on push events),
-# gh-release.yml (creates a release), pages.yml (deploys), maturin-wheels.yml (slow; covered
-# by the first pilot repo), go-release.yml (needs go.mod at the repository root).
+# docker.yml runs on pull requests only (build, no login, no push); pages.yml builds with
+# deploy: false. Not exercised: gh-release.yml (creates a release), maturin-wheels.yml (slow;
+# covered by the first pilot repo), go-release.yml (needs go.mod at the repository root).
 name: CI
 
 on:
@@ -123,6 +123,41 @@ jobs:
       test-command: bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage
       coverage-path: coverage/lcov.info
 
+  # Pull requests only: the PR path builds without logging in or pushing. Two platforms
+  # exercise the QEMU step; pr-paths exercises the changed-files filter.
+  docker:
+    name: docker (PR build)
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    uses: ./.github/workflows/docker.yml
+    with:
+      image: ghcr.io/seiunx-dev/ci-templates-selftest
+      context: tests/fixtures/docker
+      platforms: linux/amd64,linux/arm64
+      version-build-arg: APP_VERSION
+      pr-paths: |
+        tests/fixtures/docker/**
+        .github/workflows/docker.yml
+        .github/workflows/self-test.yml
+
+  # Build only (deploy: false). The caller still has to grant pages/id-token because the
+  # nested deploy job declares them.
+  pages:
+    name: pages (build only)
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml
+    with:
+      working-directory: tests/fixtures/node-bun
+      build-command: bun run typecheck
+      output-dir: dist
+      deploy: false
+
   # No SONAR_TOKEN is passed: the scan must skip and stay green.
   sonar:
     name: Sonar (skip path)
@@ -216,6 +251,8 @@ jobs:
       - go
       - node-npm
       - node-bun
+      - docker
+      - pages
       - sonar
       - gate
       - rust-release

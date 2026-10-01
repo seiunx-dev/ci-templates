@@ -406,7 +406,7 @@ jobs:
     steps: *test-steps
 
   msrv:
-    name: MSRV ${{ inputs.msrv }}
+    name: MSRV
     if: inputs.msrv != ''
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.lint-timeout-minutes }}

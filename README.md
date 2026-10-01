@@ -183,8 +183,14 @@ jobs:
 `self-test.yml`（工作流名 `CI`）在 push / PR / workflow_dispatch 时：
 
 - actionlint + shellcheck 检查所有工作流；`tools/check_callers.py` 解析所有 YAML 并检查本仓库内的调用；
-- 以 `./.github/workflows/x.yml` 调用本 commit 的模板，跑 `tests/fixtures/` 下的最小项目：rust-ci（Windows、macOS、Linux + Postgres + coverage + MSRV、Debian 容器 + Redis）、python-uv-ci（3.12/3.13 矩阵 + Redis + uv build）、go-ci（Postgres + coverage 阈值）、node-ci（npm、bun + coverage）、sonar（无 token 的跳过路径）、release-gate（dry run）、rust-release（cargo linux/macOS/Windows + zigbuild glibc 2.17）并检查产物的文件名、格式、目录结构和 glibc 版本；
-- 不在自测里跑：`docker.yml`（push 事件会推 GHCR）、`gh-release.yml`（会建 release）、`pages.yml`（会部署）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）。
+- 以 `./.github/workflows/x.yml` 调用本 commit 的模板，跑 `tests/fixtures/` 下的最小项目：
+  - rust-ci：Windows、macOS、Linux + Postgres + coverage + MSRV、Debian 容器 + Redis（服务通过服务名访问）；
+  - python-uv-ci：3.12/3.13 矩阵 + Redis + `uv build`；go-ci：Postgres + 覆盖率阈值；node-ci：npm、bun + 覆盖率；
+  - 服务测试会真的连一次端口，并断言 `image: ''` 的那个服务没有启动；
+  - sonar：不传 token，验证跳过路径是绿的；release-gate：dry run；
+  - rust-release：cargo（linux/macOS/Windows）+ zigbuild（glibc 2.17），随后检查产物文件名、tar.gz/zip、dir/flat 布局、额外文件和 glibc 符号版本；
+  - docker：只在 PR 上跑（构建 amd64 + arm64，不登录、不推送，覆盖 pr-paths 过滤）；pages：只构建（`deploy: false`）。
+- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 push / promote 路径。
 
 ## 迁移前检查
 
@@ -209,6 +215,7 @@ python3 tools/check_callers.py --callers DIR --clones CLONES_DIR
 
 - PyPI trusted publishing、npm provenance 不能在可复用工作流内部完成，发布 job 留在调用方。trusted publisher 绑定的是 **workflow 文件名**：发布从别的文件挪到 release.yml 的仓库，要在第一次打 tag 之前到 PyPI 为 release.yml（environment `pypi`）新增 trusted publisher。
 - `docker.yml` 的 `latest: auto` 用 `git ls-remote` 找最高 semver tag；私有仓库匿名 ls-remote 会失败，此时回退为“稳定 tag 一律打 latest”。补打旧版本的 tag 时，私有仓库要显式传 `latest: false`。（自测在 public 仓库里，测不到这条路径。）
+- 已在 GitHub 上实测：`image: ''` 的服务容器会被跳过（日志："will not be started because the container definition has an empty image"），`container: ''` 的 job 直接跑在 runner 上。
 - 服务容器和 `container:` 只在 Linux runner 上可用。rust-ci 在没有服务和容器时走不带 `services:`/`container:` 的 job 变体，所以同一模板能跑 Windows/macOS；两个变体的步骤通过 YAML anchor 共用。
 
 ## Inputs 参考
@@ -498,7 +505,7 @@ Job：`actionlint`（actionlint 内置调用 shellcheck）。
 
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `actionlint-version` | string | `1.7.12` | taiki-e/install-action 安装的 actionlint 版本。 |
+| `actionlint-version` | string | `1.7.12` | actionlint release (without the v), downloaded from rhysd/actionlint and checked against its checksums file. |
 
 ### `actions/apt-install` — Apt install
 
