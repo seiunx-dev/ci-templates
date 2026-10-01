@@ -2,6 +2,11 @@
 
 本仓库按 [版本策略](README.md#版本策略) 发布：`v1.x.y` 不可变，`v1` 跟随最新的 `v1.x.y`。
 
+## v1.1.6 — 2026-10-01
+
+- `go-ci.yml`：去掉工作流级的 `GOTOOLCHAIN: local`。setup-go 只在 `GOTOOLCHAIN` 还没被设成 `local` 时才读 go.mod 的 `toolchain` 行，于是一直装的是 `go` 行的版本：MejiroRina/sekai-diarkis（`go 1.25.0` + `toolchain go1.25.1`）的 CI 跑在 go1.25.0 上，发布却用 golang:1.25.1 构建。setup-go 选好版本后会自己导出 `GOTOOLCHAIN=local`，后续步骤仍不会下载别的工具链。`go-release.yml` 只在构建步骤上设置，本来就对。go-min fixture 改成 `go 1.27.0` + `toolchain go1.27.1`，新测试要求 `runtime.Version()` 等于 toolchain 行。（#11）
+- `docker.yml` 新增 `build-record`（默认 `true`，行为不变）：`false` 时不上传 build-push-action 的 build record 构件（`.dockerbuild`）。私有仓库的构件按账号计存储配额，MejiroRina 的配额满了以后 SekaiColo 的 Release 连续 6 次在 upload-artifact 上失败。自测的两个 docker job 设为 `false`，新 job 检查本次 run 没有 `.dockerbuild` 构件。（#10）
+
 ## v1.1.5 — 2026-10-01
 
 - `actions/verify-version`（release-gate）新增版本来源 `go`：读 Go 文件里赋给 `Version` 的字符串（默认 `version/version.go`；支持 `var Version = "..."`、`const Version = ...` 和 var 块里的 `Version = ...`），去掉开头的 tag 前缀后与 tag 比较。用于版本号写在 Go 源码、发布时再用 `-ldflags -X` 注入 tag 的仓库（Team-Haruki/Haruki-Toolbox-Backend 的 `version.Version = "v9.0.0-rc3"`）。`extra-paths` 里的 `.go` 文件同样按这个规则读取。其他来源不变。
