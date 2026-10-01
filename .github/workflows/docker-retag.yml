@@ -15,7 +15,8 @@
 #   docker-tags:
 #     name: Docker tags
 #     needs: [docker, ci-ok]
-#     if: needs.docker.outputs.deferred-tags != ''
+#     # explicit: the implicit success() is false when any job upstream of ci-ok was skipped
+#     if: ${{ !cancelled() && needs.ci-ok.result == 'success' && needs.docker.outputs.deferred-tags != '' }}
 #     permissions:
 #       contents: read
 #       packages: write

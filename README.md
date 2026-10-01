@@ -97,7 +97,9 @@ jobs:
   docker-tags:
     name: Docker tags      # CI OK 通过后才把 :main 移到这次的镜像，不重建
     needs: [docker, ci-ok]
-    if: needs.docker.outputs.deferred-tags != ''
+    # 显式判断 ci-ok：不写状态函数时隐含 success()，ci-ok 上游有任何 job 被 skip（比如只在 PR 跑的
+    # job）也会让它被跳过，main 上 :main 就不再移动。
+    if: ${{ !cancelled() && needs.ci-ok.result == 'success' && needs.docker.outputs.deferred-tags != '' }}
     permissions:
       contents: read
       packages: write
@@ -408,7 +410,7 @@ outputs: `image`, `digest`, `version`, `deferred-tags`（没推的移动 tag，�
 
 ### `docker-retag.yml` — Docker retag
 
-Job：`Move tags`。调用方 job 权限：`contents: read`、`packages: write`。用 `docker buildx imagetools create` 把 tag 指向已在 registry 里的 digest，不重建。放在 `ci-ok` 之后（`needs: [docker, ci-ok]`，`if: needs.docker.outputs.deferred-tags != ''`）。移动前读出 tag 当前镜像的 `org.opencontainers.image.revision`，用 compare API 判断：已经指向更新的 commit 就跳过（并发的 main run 乱序结束时不会把 `:main` 往回拨）。
+Job：`Move tags`。调用方 job 权限：`contents: read`、`packages: write`。用 `docker buildx imagetools create` 把 tag 指向已在 registry 里的 digest，不重建。放在 `ci-ok` 之后（`needs: [docker, ci-ok]`，`if: ${{ !cancelled() && needs.ci-ok.result == 'success' && needs.docker.outputs.deferred-tags != '' }}`；只写 `deferred-tags != ''` 时，ci-ok 上游有 job 被 skip 就会连带跳过）。移动前读出 tag 当前镜像的 `org.opencontainers.image.revision`，用 compare API 判断：已经指向更新的 commit 就跳过（并发的 main run 乱序结束时不会把 `:main` 往回拨）。
 
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|
