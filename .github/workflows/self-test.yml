@@ -46,6 +46,8 @@ jobs:
           python3 tools/check_callers.py
       - name: Unit tests of the sonar.yml argument builder
         run: python3 tests/sonar_args_test.py
+      - name: docker-retag.yml ordering guard against stubbed docker / gh
+        run: bash tests/docker_retag_test.sh
 
   # rust-ci has two variants of each job: the plain one (no services:/container: keys) runs on
   # Windows/macOS; the services/container one only on Linux.

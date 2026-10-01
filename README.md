@@ -34,6 +34,7 @@ Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-te
 | `tools/check_callers.py` | 静态检查：YAML 语法、调用方传的 inputs/secrets 与模板声明是否对得上、每个 job 是否有 timeout、第三方 action 是否 pin 到 SHA |
 | `tests/fixtures/` | 自测用的最小 Rust / Python / Go / npm / bun / Docker 项目 |
 | `tests/sonar_args_test.py` | `sonar.yml` 参数构建步骤的单元测试（直接取工作流里的脚本运行） |
+| `tests/docker_retag_test.sh` | `docker-retag.yml` 顺序保护的测试（取工作流里的脚本，桩掉 docker / gh） |
 
 ## 怎么调用
 
@@ -209,7 +210,7 @@ jobs:
   - rust-release：cargo（linux/macOS/Windows）+ zigbuild（glibc 2.17），随后检查产物文件名、tar.gz/zip、dir/flat 布局、额外文件和 glibc 符号版本；
   - docker：PR 上构建 amd64 + arm64（不登录、不推送，覆盖 pr-paths 过滤）；push main 和 workflow_dispatch 时走 `defer-moving-tags` 推送路径，镜像是一次性的 `ghcr.io/seiunx-dev/ci-templates-selftest`：先检查 `:sha-*` 已推、分支 tag 没动，过一个替身 "CI OK" job，再用 `docker-retag.yml` 移分支 tag，最后检查分支 tag 指向同一个 digest（没有重建）；pages：只构建（`deploy: false`）。
   - sonar：`tests/sonar_args_test.py` 单元测试参数构建（multicriteria 合并、properties 语法、`project-version: auto`、report paths）。
-- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径、`docker-retag.yml` 的“tag 已指向更新的 commit”分支（由脚本桩测试覆盖，不在 CI 里）。
+- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖。
 
 ## 迁移前检查
 
@@ -234,7 +235,7 @@ python3 tools/check_callers.py --callers DIR --clones CLONES_DIR
 
 - PyPI trusted publishing、npm provenance 不能在可复用工作流内部完成，发布 job 留在调用方。trusted publisher 绑定的是 **workflow 文件名**：发布从别的文件挪到 release.yml 的仓库，要在第一次打 tag 之前到 PyPI 为 release.yml（environment `pypi`）新增 trusted publisher。
 - `sonar.yml` 用命令行 `-Dsonar.issue.ignore.multicriteria=...` 加 S7637 的忽略，命令行会覆盖 sonar-project.properties 里的同名键，所以模板先读出 properties（或 `-Dproject.settings=` 指定的文件）和 `args` 里已有的 id 再追加 `ciTemplatesPins`。只在 SonarQube Cloud 网页上配置的 multicriteria 读不到，会被这次扫描的参数盖掉；这类规则要写进 sonar-project.properties。
-- `docker-retag.yml` 的顺序保护靠镜像的 `org.opencontainers.image.revision` label 和 compare API；两个 run 同时移同一个 tag 仍有极小的竞态窗口，最坏结果是 `:main` 暂时落后一个 commit，下一次 main 合并会纠正。
+- `docker-retag.yml` 的顺序保护靠镜像的 `org.opencontainers.image.revision` label 和 compare API。两个 main run 几乎同时移同一个 tag 时，旧 commit 的 run 可能在新 run 写入前读到旧值、在它之后写入；所以每次写入后等 10 秒再检查一次（最多写 3 次），新 run 发现被旧 commit 覆盖会再写回去。没有用 concurrency group：它会取消排队中的 job。镜像没有 revision label、或 compare API 判断不了先后时，只在第一轮移动。
 - `docker.yml` 的 `latest: auto` 用 `git ls-remote` 找最高 semver tag；私有仓库匿名 ls-remote 会失败，此时回退为“稳定 tag 一律打 latest”。补打旧版本的 tag 时，私有仓库要显式传 `latest: false`。（自测在 public 仓库里，测不到这条路径。）
 - 已在 GitHub 上实测：`image: ''` 的服务容器会被跳过（日志："will not be started because the container definition has an empty image"），`container: ''` 的 job 直接跑在 runner 上。
 - 服务容器和 `container:` 只在 Linux runner 上可用。rust-ci 在没有服务和容器时走不带 `services:`/`container:` 的 job 变体，所以同一模板能跑 Windows/macOS；两个变体的步骤通过 YAML anchor 共用。
