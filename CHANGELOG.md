@@ -2,6 +2,15 @@
 
 本仓库按 [版本策略](README.md#版本策略) 发布：`v1.x.y` 不可变，`v1` 跟随最新的 `v1.x.y`。
 
+## v1.1.3 — 2026-10-01
+
+- `actions/verify-version`（release-gate）：只有 tag 的 **push** 事件才算发布（`is-tag=true`、输出 `tag`）。之前在 tag 上手动触发 `workflow_dispatch` 也会得到 `is-tag=true`，调用方的 promote 和 GitHub Release job 会真的发布，违背"dispatch = dry run"的约定。现在这种运行只打一条 notice，按 manifest 版本构建，不发布。tag push 的行为不变。
+- 新增 `tests/verify_version_test.sh`（取 action 的脚本，覆盖 push / dispatch × tag / 分支），自测的 `yaml` job 会运行它。
+
+## v1.1.2 — 2026-10-01
+
+- `rust-release.yml` 新增 `require-build-secrets`：设为 true 时，`build-secret-names` 里任何一个变量为空（对应的 `build-secret-N` 没传）就在编译前失败，避免发布没有编译期密钥的二进制。只打印变量名，不打印值。（#4）
+
 ## v1.1.1 — 2026-10-01
 
 - `docker-retag.yml`：写入后等 10 秒再检查一次（最多写 3 次）。两个 main run 几乎同时结束时，旧 commit 的 run 可能在新 run 写入前读到 tag、在它之后写入，把 `:main` 拨回旧 commit；新 run 的复查会发现并写回。不用 concurrency group，因为它会取消排队中的 job。

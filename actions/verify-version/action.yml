@@ -21,10 +21,10 @@ outputs:
     description: Version without prefix (e.g. 1.2.3 or 1.2.3-rc.1).
     value: ${{ steps.v.outputs.version }}
   tag:
-    description: Tag name when the run is a tag push, else empty.
+    description: Tag name when the run is a tag push, else empty (also on a workflow_dispatch started on a tag).
     value: ${{ steps.v.outputs.tag }}
   is-tag:
-    description: "'true' on a tag push that matches the prefix."
+    description: "'true' only on a tag push (event push) that matches the prefix; 'false' for dry runs, including workflow_dispatch on a tag ref."
     value: ${{ steps.v.outputs.is-tag }}
   prerelease:
     description: "'true' when the version has a pre-release part (contains '-')."
@@ -74,7 +74,13 @@ runs:
         fi
         tag=""; is_tag=false; tag_version=""
         if [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" == "$PREFIX"* ]]; then
-          tag="$GITHUB_REF_NAME"; is_tag=true; tag_version="${GITHUB_REF_NAME#"$PREFIX"}"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag="$GITHUB_REF_NAME"; is_tag=true; tag_version="${GITHUB_REF_NAME#"$PREFIX"}"
+          else
+            # Only a tag push publishes. A workflow_dispatch run started on a tag ref is still a
+            # dry run (is-tag=false): it builds from the manifest version and publishes nothing.
+            echo "::notice::$GITHUB_EVENT_NAME on tag $GITHUB_REF_NAME: dry run, nothing is published (only a tag push releases)"
+          fi
         fi
         if [ "$SOURCE" = none ]; then
           version="${tag_version:-0.0.0-dev.${GITHUB_SHA::7}}"

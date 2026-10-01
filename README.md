@@ -35,6 +35,7 @@ Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-te
 | `tests/fixtures/` | 自测用的最小 Rust / Python / Go / npm / bun / Docker 项目 |
 | `tests/sonar_args_test.py` | `sonar.yml` 参数构建步骤的单元测试（直接取工作流里的脚本运行） |
 | `tests/docker_retag_test.sh` | `docker-retag.yml` 顺序保护的测试（取工作流里的脚本，桩掉 docker / gh） |
+| `tests/verify_version_test.sh` | `actions/verify-version` 的事件 / ref 组合测试（只有 tag push 时 `is-tag=true`） |
 
 ## 怎么调用
 
@@ -160,7 +161,7 @@ jobs:
 
 ## 约定（已写进模板）
 
-- **两个工作流**：`CI`（push main、pull_request main、workflow_dispatch）和 `Release`（push tags `v*`；workflow_dispatch 用作 dry run，构建全部产物但不发布任何东西）。
+- **两个工作流**：`CI`（push main、pull_request main、workflow_dispatch）和 `Release`（push tags `v*`；workflow_dispatch 用作 dry run，构建全部产物但不发布任何东西，在 tag 上手动触发也一样：只有 tag 的 push 事件会发布）。
 - **Docker 不等测试**（v1.1.0 起）：CI 里的 docker job 不 `needs` 测试，和测试并行，`defer-moving-tags: true`。main 上构建完立刻推不可变的 `:sha-<完整 sha>`、`:sha-<7 位>`（和 `:buildcache`）；`:main` 这类移动 tag 由 `ci-ok` 之后的 `docker-retag.yml` job 移过去（重打 tag，不重建），所以 `:main` 只会指向 "CI OK" 通过的 commit，但会比 `:sha-*` 晚到（晚多少取决于测试和 Sonar 比镜像构建慢多少）。部署要尽早拿到镜像就 pin `:sha-<7 位>`。测试失败的 commit 也会留下 `:sha-*` 镜像，但它没有 "CI OK"，release-gate 不会放行它的 tag。只有 docker 构建要用测试 job 产出的构件（`artifact-name`）时才保留 `needs`。
 - **Release 不变**：release-gate 等被打 tag 的 commit 上 "CI OK" 变绿（docker 在 `ci-ok` 的 needs 里，所以 `:sha-<sha>` 一定已经在），`promote-on-tag` 再把它重打成 `:X.Y.Z` / `:X.Y` / `:latest`。
 - **唯一的 required check 是 `CI OK`**：它是 `ci-ok` 聚合 job，`needs` 其余所有 job；有 job failure 或 cancelled 就失败，skipped 视为通过。
@@ -210,7 +211,7 @@ jobs:
   - rust-release：cargo（linux/macOS/Windows）+ zigbuild（glibc 2.17），随后检查产物文件名、tar.gz/zip、dir/flat 布局、额外文件和 glibc 符号版本；
   - docker：PR 上构建 amd64 + arm64（不登录、不推送，覆盖 pr-paths 过滤）；push main 和 workflow_dispatch 时走 `defer-moving-tags` 推送路径，镜像是一次性的 `ghcr.io/seiunx-dev/ci-templates-selftest`：先检查 `:sha-*` 已推、分支 tag 没动，过一个替身 "CI OK" job，再用 `docker-retag.yml` 移分支 tag，最后检查分支 tag 指向同一个 digest（没有重建）；pages：只构建（`deploy: false`）。
   - sonar：`tests/sonar_args_test.py` 单元测试参数构建（multicriteria 合并、properties 语法、`project-version: auto`、report paths）。
-- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖。
+- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖；`verify-version` 的事件 / ref 组合（只有 tag push 发布）由 `tests/verify_version_test.sh` 覆盖。
 
 ## 迁移前检查
 
@@ -422,7 +423,7 @@ outputs: `moved`（实际移动的 tag，每行一个）
 
 ### `release-gate.yml` — Release gate
 
-Job：`Gate`。调用方 job 权限：`contents: read`、`checks: read`。outputs 供后续 job 使用：`version`、`tag`、`is-tag`（dry run 为 `false`）、`prerelease`。
+Job：`Gate`。调用方 job 权限：`contents: read`、`checks: read`。outputs 供后续 job 使用：`version`、`tag`、`is-tag`（只有 tag 的 push 事件为 `true`；dry run 为 `false`，包括在 tag 上手动 workflow_dispatch）、`prerelease`。
 
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|
