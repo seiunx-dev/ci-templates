@@ -95,11 +95,19 @@ jobs:
       - name: ruff
         if: inputs.ruff
         run: |
-          if [ -f uv.lock ] && grep -q '^name = "ruff"$' uv.lock; then
-            ruff="uv run --frozen ruff"   # the project's pinned ruff
+          # The project's locked ruff when uv.lock has one, run via uvx so it does not depend
+          # on which extra or dependency group pulls ruff in (`uv run` would only sync the
+          # default groups and miss ruff declared under an optional extra).
+          ver=""
+          if [ -f uv.lock ]; then
+            ver=$(awk '/^\[\[package\]\]/{n=""} /^name = /{n=$3} n=="\"ruff\"" && /^version = /{gsub(/"/,"",$3); print $3; exit}' uv.lock)
+          fi
+          if [ -n "$ver" ]; then
+            ruff="uvx ruff@$ver"
           else
             ruff="uvx ruff"
           fi
+          echo "ruff: ${ver:-latest}"
           $ruff check --output-format=github .
           $ruff format --check .
       - name: Extra lint
