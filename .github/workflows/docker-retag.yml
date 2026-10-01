@@ -1,0 +1,143 @@
+# Point moving image tags (:main, ...) at an image that is already in the registry, without
+# rebuilding (`docker buildx imagetools create --prefer-index=false`: the tag gets exactly the
+# given digest). Companion of docker.yml's
+# `defer-moving-tags: true`: the image job pushes only :sha-* tags in parallel with the tests,
+# and this job, placed after the aggregate "CI OK" job, moves the branch tag once CI passed.
+#
+# Ordering guard: runs of consecutive commits finish in any order. Before moving a tag, the
+# commit recorded in the image it currently points to (label org.opencontainers.image.revision,
+# set by docker.yml) is compared with this run's commit through the GitHub compare API; when
+# the tag already holds a newer commit, it is left alone. Disable with `check-ancestry: false`.
+#
+# Caller example (ci.yml):
+#   docker-tags:
+#     name: Docker tags
+#     needs: [docker, ci-ok]
+#     if: needs.docker.outputs.deferred-tags != ''
+#     permissions:
+#       contents: read
+#       packages: write
+#     uses: seiunx-dev/ci-templates/.github/workflows/docker-retag.yml@v1
+#     with:
+#       image: ${{ needs.docker.outputs.image }}
+#       digest: ${{ needs.docker.outputs.digest }}
+#       tags: ${{ needs.docker.outputs.deferred-tags }}
+#
+# Caller job permissions: contents: read, packages: write.
+name: Docker retag
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Full image name. Empty = ghcr.io/<owner>/<repo> lowercased.
+        type: string
+        default: ""
+      digest:
+        description: Digest to tag (sha256:...). Empty = whatever :sha-<this commit> points to.
+        type: string
+        default: ""
+      tags:
+        description: Tags to point at the image, one per line; full references (image:tag) or bare tag names.
+        type: string
+        required: true
+      registry:
+        description: Registry to log in to. Empty = the host part of `image`.
+        type: string
+        default: ""
+      check-ancestry:
+        description: Skip a tag that already points to an image built from a newer commit.
+        type: boolean
+        default: true
+      timeout-minutes:
+        type: number
+        default: 10
+    outputs:
+      moved:
+        description: Tags that were moved, one per line.
+        value: ${{ jobs.retag.outputs.moved }}
+
+jobs:
+  retag:
+    name: Move tags
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # compare API (ordering guard)
+      packages: write
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      moved: ${{ steps.retag.outputs.moved }}
+    steps:
+      - name: Resolve image
+        id: image
+        env:
+          IMAGE: ${{ inputs.image }}
+          REGISTRY: ${{ inputs.registry }}
+        run: |
+          image="${IMAGE:-ghcr.io/${GITHUB_REPOSITORY}}"; image="$(tr '[:upper:]' '[:lower:]' <<< "$image")"
+          registry="${REGISTRY:-${image%%/*}}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "registry=$registry" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ${{ steps.image.outputs.registry }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ steps.image.outputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Move tags
+        id: retag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          DIGEST: ${{ inputs.digest }}
+          TAGS: ${{ inputs.tags }}
+          CHECK: ${{ inputs.check-ancestry }}
+        run: |
+          set -euo pipefail
+          if [ -n "$DIGEST" ]; then src="$IMAGE@$DIGEST"; else src="$IMAGE:sha-$GITHUB_SHA"; fi
+          if ! docker buildx imagetools inspect "$src" > /dev/null; then
+            echo "::error::$src does not exist; nothing to tag"; exit 1
+          fi
+
+          # Commit an image was built from (multi-platform: first non-attestation entry).
+          revision() {
+            docker buildx imagetools inspect "$1" --format '{{json .Image}}' 2> /dev/null | jq -r '
+              (if has("config") or has("rootfs") then . else
+                ([to_entries[] | select(.key != "unknown/unknown") | .value] | first) end)
+              | .config.Labels["org.opencontainers.image.revision"] // empty' 2> /dev/null || true
+          }
+
+          args=(); moved=""
+          while IFS= read -r t; do
+            t="${t#"${t%%[![:space:]]*}"}"; t="${t%"${t##*[![:space:]]}"}"
+            [ -n "$t" ] || continue
+            [[ "${t##*/}" == *:* ]] || t="$IMAGE:$t"
+            if [ "$CHECK" = true ]; then
+              current=$(revision "$t")
+              if [ "$current" = "$GITHUB_SHA" ]; then
+                echo "$t already holds $GITHUB_SHA"
+              elif [ -n "$current" ]; then
+                status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$current...$GITHUB_SHA" --jq .status 2> /dev/null || echo unknown)
+                case "$status" in
+                  behind)
+                    echo "::notice::$t holds ${current::7}, which is newer than ${GITHUB_SHA::7}; left alone"
+                    continue ;;
+                  ahead|identical) ;;
+                  *) echo "::warning::cannot order ${current::7} and ${GITHUB_SHA::7} (compare: $status); moving $t anyway" ;;
+                esac
+              fi
+            fi
+            args+=(--tag "$t"); moved="$moved$t"$'\n'
+          done <<< "$TAGS"
+
+          if [ "${#args[@]}" -gt 0 ]; then
+            # --prefer-index=false: a single-platform image is tagged as the same manifest (same
+            # digest) instead of being wrapped in a new one-entry index; an index is copied as is.
+            docker buildx imagetools create --prefer-index=false "${args[@]}" "$src"
+            printf 'Moved to %s:\n%s' "$src" "$moved"
+          else
+            echo "No tag to move."
+          fi
+          { echo "moved<<__EOF__"; printf '%s' "$moved"; echo "__EOF__"; } >> "$GITHUB_OUTPUT"

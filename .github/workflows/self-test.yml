@@ -5,8 +5,11 @@
 # so they resolve to the published v1 tag, not to this commit. A change under actions/ is
 # exercised here only after v1 has been moved (see README, "发布本仓库").
 #
-# docker.yml runs on pull requests only (build, no login, no push); pages.yml builds with
-# deploy: false. Not exercised: gh-release.yml (creates a release), maturin-wheels.yml (slow;
+# docker.yml: on pull requests it builds without logging in or pushing. On pushes to main and
+# on workflow_dispatch it also runs the defer-moving-tags path against the throwaway image
+# ghcr.io/seiunx-dev/ci-templates-selftest: push :sha-* only, check the moving tag did not move,
+# pass a stand-in "CI OK" job, move the tag with docker-retag.yml and check it again.
+# pages.yml builds with deploy: false. Not exercised: gh-release.yml (creates a release), maturin-wheels.yml (slow;
 # covered by the first pilot repo), go-release.yml (needs go.mod at the repository root).
 name: CI
 
@@ -41,6 +44,8 @@ jobs:
         run: |
           python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user --break-system-packages pyyaml
           python3 tools/check_callers.py
+      - name: Unit tests of the sonar.yml argument builder
+        run: python3 tests/sonar_args_test.py
 
   # rust-ci has two variants of each job: the plain one (no services:/container: keys) runs on
   # Windows/macOS; the services/container one only on Linux.
@@ -142,6 +147,111 @@ jobs:
         tests/fixtures/docker/**
         .github/workflows/docker.yml
         .github/workflows/self-test.yml
+
+  # Push path with deferred moving tags (never on PRs: no login there). Throwaway image only.
+  docker-push:
+    name: docker (push, deferred tags)
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    uses: ./.github/workflows/docker.yml
+    with:
+      image: ghcr.io/seiunx-dev/ci-templates-selftest
+      context: tests/fixtures/docker
+      version-build-arg: APP_VERSION
+      cache-backend: registry
+      defer-moving-tags: true
+
+  docker-before:
+    name: docker (sha tags pushed, moving tag not yet)
+    needs: docker-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Check tags
+        env:
+          IMAGE: ${{ needs.docker-push.outputs.image }}
+          DIGEST: ${{ needs.docker-push.outputs.digest }}
+          DEFERRED: ${{ needs.docker-push.outputs.deferred-tags }}
+        run: &check-tags |
+          set -euo pipefail
+          digest_of() { docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' 2> /dev/null | jq -r .digest || true; }
+          [[ "$DIGEST" == sha256:* ]] || { echo "::error::no digest output: '$DIGEST'"; exit 1; }
+          for t in "$IMAGE:sha-$GITHUB_SHA" "$IMAGE:sha-${GITHUB_SHA::7}"; do
+            got=$(digest_of "$t"); echo "$t -> $got"
+            [ "$got" = "$DIGEST" ] || { echo "::error::$t is not $DIGEST"; exit 1; }
+          done
+          branch="$IMAGE:${GITHUB_REF_NAME//[^a-zA-Z0-9._-]/-}"
+          [ "$(printf '%s' "$DEFERRED")" = "$branch" ] || { echo "::error::deferred-tags is '$DEFERRED', expected '$branch'"; exit 1; }
+          got=$(digest_of "$branch"); echo "$branch -> ${got:-<none>}"
+          if [ "$PHASE" = before ] && [ "$got" = "$DIGEST" ]; then echo "::error::$branch moved before CI OK"; exit 1; fi
+          if [ "$PHASE" = after ] && [ "$got" != "$DIGEST" ]; then echo "::error::$branch was not moved to $DIGEST"; exit 1; fi
+          echo "ok ($PHASE)"
+    env:
+      PHASE: before
+
+  # Stands in for a caller's aggregate "CI OK" job.
+  fake-ci-ok:
+    name: Fake CI OK
+    needs: [docker-push, docker-before]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "tests passed"
+
+  docker-retag:
+    name: docker-retag (move the deferred tag)
+    needs: [docker-push, fake-ci-ok]
+    if: needs.docker-push.outputs.deferred-tags != ''
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-retag.yml
+    with:
+      image: ${{ needs.docker-push.outputs.image }}
+      digest: ${{ needs.docker-push.outputs.digest }}
+      tags: ${{ needs.docker-push.outputs.deferred-tags }}
+
+  docker-after:
+    name: docker (moving tag moved, no rebuild)
+    needs: [docker-push, docker-retag]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Check tags
+        env:
+          IMAGE: ${{ needs.docker-push.outputs.image }}
+          DIGEST: ${{ needs.docker-push.outputs.digest }}
+          DEFERRED: ${{ needs.docker-push.outputs.deferred-tags }}
+          MOVED: ${{ needs.docker-retag.outputs.moved }}
+        run: |
+          [ "$(printf '%s' "$MOVED")" = "$(printf '%s' "$DEFERRED")" ] || { echo "::error::moved '$MOVED' != deferred '$DEFERRED'"; exit 1; }
+      - name: Check registry
+        env:
+          IMAGE: ${{ needs.docker-push.outputs.image }}
+          DIGEST: ${{ needs.docker-push.outputs.digest }}
+          DEFERRED: ${{ needs.docker-push.outputs.deferred-tags }}
+        run: *check-tags
+    env:
+      PHASE: after
 
   # Build only (deploy: false). The caller still has to grant pages/id-token because the
   # nested deploy job declares them.
@@ -252,6 +362,11 @@ jobs:
       - node-npm
       - node-bun
       - docker
+      - docker-push
+      - docker-before
+      - fake-ci-ok
+      - docker-retag
+      - docker-after
       - pages
       - sonar
       - gate

@@ -13,6 +13,16 @@
 #   coverage/cpp.xml        -> sonar.coverageReportPaths (generic format, e.g. gcovr --sonarqube)
 # Only files that were actually downloaded are passed. Set `report-paths: false` to opt out.
 #
+# Template pins: rule githubactions:S7637 wants every `uses:` pinned to a full commit SHA, and
+# flags the `@v1` references to these templates (a Security issue: rating C, failed gate). The
+# scan ignores that rule in .github/workflows/** (multicriteria id `ciTemplatesPins`). A -D
+# argument replaces the same key in sonar-project.properties, so the ids already listed in
+# `sonar.issue.ignore.multicriteria` there (or in `args`) are read and kept; their
+# `.ruleKey` / `.resourceKey` keys are not touched. Limitation: ids defined only in the
+# SonarQube Cloud UI are not visible to the scan; move them to sonar-project.properties.
+# Third-party actions are still pinned by SHA in the templates. `ignore-template-pins: false`
+# turns this off.
+#
 # Caller example:
 #   sonar:
 #     needs: [rust]
@@ -29,7 +39,10 @@ on:
         type: string
         default: coverage-*
       project-version:
-        description: sonar.projectVersion (leave empty; do not hard-code it in sonar-project.properties).
+        description: >-
+          sonar.projectVersion. Empty = not passed; `auto` = the version in the root Cargo.toml
+          ([package] or [workspace.package]), package.json or pyproject.toml. Do not hard-code it in
+          sonar-project.properties.
         type: string
         default: ""
       args:
@@ -38,6 +51,12 @@ on:
         default: ""
       report-paths:
         description: Pass the report path of every downloaded coverage file (see header).
+        type: boolean
+        default: true
+      ignore-template-pins:
+        description: >-
+          Ignore githubactions:S7637 ("use a full commit SHA") in .github/workflows/**, so the @v1
+          references to these templates do not fail the quality gate (see header).
         type: boolean
         default: true
       timeout-minutes:
@@ -83,30 +102,121 @@ jobs:
           pattern: ${{ inputs.coverage-pattern }}
           path: coverage
           merge-multiple: true
+      # Python so the logic can be unit-tested: tests/sonar_args_test.py runs this exact step.
       - name: Build scanner arguments
         if: steps.token.outputs.present == 'true'
         id: args
+        shell: python3 {0}
         env:
           VERSION: ${{ inputs.project-version }}
           EXTRA: ${{ inputs.args }}
           AUTO: ${{ inputs.report-paths }}
+          IGNORE_PINS: ${{ inputs.ignore-template-pins }}
         run: |
-          args="$EXTRA"
-          [ -n "$VERSION" ] && args="$args -Dsonar.projectVersion=$VERSION"
-          if [ "$AUTO" = true ]; then
-            while read -r file prop; do
-              if [ -f "coverage/$file" ]; then args="$args -D$prop=coverage/$file"; fi
-            done <<'MAP'
-          lcov-rust.info sonar.rust.lcov.reportPaths
-          go.out sonar.go.coverage.reportPaths
-          python.xml sonar.python.coverage.reportPaths
-          lcov-js.info sonar.javascript.lcov.reportPaths
-          cpp.xml sonar.coverageReportPaths
-          MAP
-          fi
-          echo "args=$args" >> "$GITHUB_OUTPUT"
-          echo "scanner args: $args"
-          ls -la coverage 2>/dev/null || echo "no coverage files"
+          import json, os, pathlib, re, tomllib
+
+          MC = "sonar.issue.ignore.multicriteria"
+          PIN_ID = "ciTemplatesPins"
+          REPORTS = [  # coverage/<file> -> property
+              ("lcov-rust.info", "sonar.rust.lcov.reportPaths"),
+              ("go.out", "sonar.go.coverage.reportPaths"),
+              ("python.xml", "sonar.python.coverage.reportPaths"),
+              ("lcov-js.info", "sonar.javascript.lcov.reportPaths"),
+              ("cpp.xml", "sonar.coverageReportPaths"),
+          ]
+
+
+          def arg_value(text, key):
+              """Value of -D<key>=... in an argument string ("..." / '...' quoting allowed)."""
+              m = re.search(rf"(?:^|\s)-D{re.escape(key)}=(\"[^\"]*\"|'[^']*'|\S*)", text)
+              return None if m is None else m.group(1).strip("\"'")
+
+
+          def read_properties(path):
+              """Minimal java.util.Properties reader: comments, = / : / blank separators, \\ continuations."""
+              props, logical = {}, None
+              try:
+                  lines = pathlib.Path(path).read_text(encoding="utf-8").splitlines()
+              except OSError:
+                  return props
+              for raw in lines:
+                  line = raw.lstrip()
+                  if logical is None and (not line or line[0] in "#!"):
+                      continue
+                  trailing = len(line) - len(line.rstrip("\\"))
+                  part = line[:-1] if trailing % 2 else line
+                  logical = part if logical is None else logical + part
+                  if trailing % 2:
+                      continue
+                  m = re.match(r"((?:\\.|[^\s=:\\])*)\s*[=:]?\s*(.*)$", logical, re.S)
+                  props[re.sub(r"\\(.)", r"\1", m.group(1))] = m.group(2)
+                  logical = None
+              return props
+
+
+          def manifest_version():
+              """version of the root Cargo.toml ([package] or [workspace.package]), package.json or pyproject.toml."""
+              try:
+                  cargo = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
+                  v = (cargo.get("package") or {}).get("version")
+                  if not isinstance(v, str):
+                      v = ((cargo.get("workspace") or {}).get("package") or {}).get("version")
+                  if isinstance(v, str):
+                      return v
+              except (OSError, tomllib.TOMLDecodeError):
+                  pass
+              try:
+                  v = json.loads(pathlib.Path("package.json").read_text(encoding="utf-8")).get("version")
+                  if isinstance(v, str):
+                      return v
+              except (OSError, ValueError, AttributeError):
+                  pass
+              try:
+                  v = (tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8")).get("project") or {}).get("version")
+                  if isinstance(v, str):
+                      return v
+              except (OSError, tomllib.TOMLDecodeError):
+                  pass
+              return None
+
+
+          extra = os.environ.get("EXTRA", "").strip()
+          version = os.environ.get("VERSION", "").strip()
+          args = []
+
+          # Ignore githubactions:S7637 (full-SHA pins) for the @v1 template references. A -D on the
+          # command line replaces the properties-file key, so the ids the repo already lists (in
+          # sonar-project.properties or in `args`) are merged in; their per-id keys stay untouched.
+          if os.environ.get("IGNORE_PINS") == "true":
+              settings = arg_value(extra, "project.settings") or "sonar-project.properties"
+              ids = []
+              for src in (read_properties(settings).get(MC), arg_value(extra, MC), PIN_ID):
+                  for i in (src or "").split(","):
+                      if i.strip() and i.strip() not in ids:
+                          ids.append(i.strip())
+              extra = re.sub(rf"(?:^|\s)-D{re.escape(MC)}=(\"[^\"]*\"|'[^']*'|\S*)", "", extra).strip()
+              args += [
+                  f"-D{MC}={','.join(ids)}",
+                  f"-D{MC}.{PIN_ID}.ruleKey=githubactions:S7637",
+                  f"-D{MC}.{PIN_ID}.resourceKey=.github/workflows/**",
+              ]
+
+          if version == "auto":
+              version = manifest_version() or ""
+              if not version:
+                  print("::notice::project-version: auto found no version in Cargo.toml, package.json or pyproject.toml")
+          if version:
+              args.append(f"-Dsonar.projectVersion={version}")
+
+          if os.environ.get("AUTO") == "true":
+              args += [f"-D{prop}=coverage/{f}" for f, prop in REPORTS if pathlib.Path("coverage", f).is_file()]
+
+          line = " ".join(([extra] if extra else []) + args)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"args={line}\n")
+          print(f"scanner args: {line}")
+          cov = pathlib.Path("coverage")
+          print("coverage files:", ", ".join(sorted(p.name for p in cov.iterdir())) if cov.is_dir() else "none")
       - name: SonarQube scan
         if: steps.token.outputs.present == 'true'
         uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0

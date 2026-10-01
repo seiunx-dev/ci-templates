@@ -6,6 +6,12 @@
 #   branch push    build + push :<branch>, :sha-<full sha> and :sha-<7 chars> (the short
 #                  form most deployments already pin); writes the build cache only from
 #                  the default branch.
+#                  With `defer-moving-tags: true` only the immutable :sha-* tags (and the
+#                  cache) are pushed; the moving tags (:<branch> and any non-sha extra tag)
+#                  come back in the `deferred-tags` output, and the caller moves them with
+#                  docker-retag.yml after its "CI OK" job passed. This lets the image job run
+#                  in parallel with the tests (no `needs:` on them) without ever pointing
+#                  :main at an image whose commit failed CI.
 #   tag push       with `promote-on-tag: true`, re-tag the existing :sha-<sha> image
 #                  (built from main) as :X.Y.Z / :X.Y / :latest with
 #                  `docker buildx imagetools create`: no rebuild. Falls back to a build
@@ -64,6 +70,13 @@ on:
         description: Extra docker/metadata-action tag rules, one per line.
         type: string
         default: ""
+      defer-moving-tags:
+        description: >-
+          Branch pushes: push only the :sha-* tags and return the moving tags (:<branch>, non-sha
+          extra tags) in the deferred-tags output for docker-retag.yml (run it after CI OK).
+          Tag pushes and pull requests are not affected.
+        type: boolean
+        default: false
       promote-on-tag:
         description: On tag pushes, re-tag the :sha-<sha> image instead of rebuilding.
         type: boolean
@@ -126,6 +139,11 @@ on:
       version:
         description: Version used for tags/labels.
         value: ${{ jobs.docker.outputs.version }}
+      deferred-tags:
+        description: >-
+          Moving tags that were not pushed (defer-moving-tags), one full image reference per line.
+          Empty when nothing was deferred. Pass to docker-retag.yml with the digest.
+        value: ${{ jobs.docker.outputs.deferred-tags }}
 
 env:
   DOCKER_BUILD_RECORD_RETENTION_DAYS: 3
@@ -139,6 +157,7 @@ jobs:
       image: ${{ steps.meta0.outputs.image }}
       digest: ${{ steps.promote.outputs.digest || steps.build.outputs.digest }}
       version: ${{ steps.meta0.outputs.version }}
+      deferred-tags: ${{ steps.build.outputs.digest && steps.split.outputs.deferred || '' }}
     steps:
       - name: Changed paths
         id: paths
@@ -249,6 +268,31 @@ jobs:
           labels: |
             org.opencontainers.image.version=${{ steps.meta0.outputs.version }}
 
+      - name: Split immutable and moving tags
+        id: split
+        if: steps.paths.outputs.build == 'true'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE: ${{ steps.meta0.outputs.image }}
+          DEFER: ${{ inputs.defer-moving-tags && github.event_name != 'pull_request' && steps.meta0.outputs.is-tag != 'true' }}
+        run: |
+          push=""; deferred=""
+          while IFS= read -r t; do
+            [ -n "$t" ] || continue
+            if [ "$DEFER" = true ] && [[ "$t" != "$IMAGE:sha-"* ]]; then
+              deferred="$deferred$t"$'\n'
+            else
+              push="$push$t"$'\n'
+            fi
+          done <<< "$TAGS"
+          {
+            echo "push<<__EOF__"; printf '%s' "$push"; echo "__EOF__"
+            echo "deferred<<__EOF__"; printf '%s' "$deferred"; echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+          if [ -n "$deferred" ]; then
+            printf 'Pushing now:\n%s\nDeferred until CI OK (docker-retag.yml):\n%s\n' "$push" "$deferred"
+          fi
+
       - name: Promote main image
         id: promote
         if: steps.paths.outputs.build == 'true' && inputs.promote-on-tag && steps.meta0.outputs.is-tag == 'true'
@@ -320,7 +364,7 @@ jobs:
           target: ${{ inputs.target }}
           platforms: ${{ inputs.platforms }}
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.split.outputs.push }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ steps.args.outputs.list }}
           cache-from: ${{ steps.cache.outputs.from }}
