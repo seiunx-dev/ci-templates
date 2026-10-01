@@ -10,7 +10,7 @@ on:
   workflow_call:
     inputs:
       version-source:
-        description: "cargo | pyproject | package-json | file | none"
+        description: "cargo | pyproject | package-json | file | go | none (see actions/verify-version)"
         type: string
         default: cargo
       version-path:

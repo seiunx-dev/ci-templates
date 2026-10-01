@@ -35,7 +35,7 @@ Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-te
 | `tests/fixtures/` | 自测用的最小 Rust / Python / Go / npm / bun / Docker 项目 |
 | `tests/sonar_args_test.py` | `sonar.yml` 参数构建步骤的单元测试（直接取工作流里的脚本运行） |
 | `tests/docker_retag_test.sh` | `docker-retag.yml` 顺序保护的测试（取工作流里的脚本，桩掉 docker / gh） |
-| `tests/verify_version_test.sh` | `actions/verify-version` 的事件 / ref 组合测试（只有 tag push 时 `is-tag=true`） |
+| `tests/verify_version_test.sh` | `actions/verify-version` 的事件 / ref 组合测试（只有 tag push 时 `is-tag=true`），以及 `go` / `none` 版本来源 |
 
 ## 怎么调用
 
@@ -429,7 +429,7 @@ Job：`Gate`。调用方 job 权限：`contents: read`、`checks: read`。output
 
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `version-source` | string | `cargo` | cargo \| pyproject \| package-json \| file \| none |
+| `version-source` | string | `cargo` | cargo \| pyproject \| package-json \| file \| go \| none（`go` 读 Go 源码里的 `Version = "..."`，见 `actions/verify-version`；`none` 只取 tag） |
 | `version-path` | string | `''` | Manifest path (default per source). |
 | `version-extra-paths` | string | `''` | Other manifests that must carry the same version, one per line. |
 | `tag-prefix` | string | `v` | tag 前缀（v、engine-v ...）。 |
@@ -608,8 +608,8 @@ Resolve the release version and, on a tag push, fail unless the tag equals <tag-
 
 | input | 默认 | 说明 |
 |---|---|---|
-| `source` | `cargo` | cargo \| pyproject \| package-json \| file \| none. 'none' takes the version from the tag only. |
-| `path` | `''` | Manifest path. Defaults per source (Cargo.toml, pyproject.toml, package.json, VERSION). |
+| `source` | `cargo` | cargo \| pyproject \| package-json \| file \| go \| none. 'none' takes the version from the tag only. 'go' reads the string assigned to `Version` in a Go file (`var Version = "v1.2.3"`, `const Version = ...` or a `Version = ...` line in a var block) and strips a leading tag-prefix, for repos that keep the version in Go source and inject the tag with `-ldflags -X`. |
+| `path` | `''` | Manifest path. Defaults per source (Cargo.toml, pyproject.toml, package.json, VERSION, version/version.go). |
 | `extra-paths` | `''` | Additional manifests (same source syntax is auto-detected by file name) that must carry the same version, one per line. |
 | `tag-prefix` | `v` | Tag prefix in front of the version (v, engine-v, ...). |
 

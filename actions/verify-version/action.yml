@@ -5,10 +5,15 @@ description: >-
   (bumped by a PR before tagging); CI never rewrites Cargo.toml/pyproject from the tag.
 inputs:
   source:
-    description: "cargo | pyproject | package-json | file | none. 'none' takes the version from the tag only."
+    description: >-
+      cargo | pyproject | package-json | file | go | none. 'none' takes the version from the tag
+      only. 'go' reads the string assigned to `Version` in a Go file (default version/version.go;
+      `var Version = "v1.2.3"`, `const Version = ...` or a `Version = ...` line in a var block),
+      with a leading tag-prefix stripped, for repos that keep the version in Go source and inject
+      the tag with -ldflags -X.
     default: cargo
   path:
-    description: Manifest path. Defaults per source (Cargo.toml, pyproject.toml, package.json, VERSION).
+    description: Manifest path. Defaults per source (Cargo.toml, pyproject.toml, package.json, VERSION, version/version.go).
     default: ""
   extra-paths:
     description: Additional manifests (same source syntax is auto-detected by file name) that must carry the same version, one per line.
@@ -61,6 +66,17 @@ runs:
         PY
               ;;
             *package.json) python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$file" ;;
+            *.go)
+              python3 - "$file" "$PREFIX" <<'PY'
+        import re, sys
+        src = open(sys.argv[1], encoding="utf-8").read()
+        m = re.search(r'^\s*(?:(?:var|const)\s+)?Version(?:\s+string)?\s*=\s*"([^"]*)"', src, re.M)
+        if not m or not m.group(1):
+            sys.exit(f'no `Version = "..."` string in {sys.argv[1]}')
+        v, prefix = m.group(1), sys.argv[2]
+        print(v[len(prefix):] if prefix and v.startswith(prefix) else v)
+        PY
+              ;;
             *) tr -d '[:space:]' < "$file"; echo ;;
           esac
         }
@@ -70,6 +86,7 @@ runs:
             pyproject) MANIFEST=pyproject.toml ;;
             package-json) MANIFEST=package.json ;;
             file) MANIFEST=VERSION ;;
+            go) MANIFEST=version/version.go ;;
           esac
         fi
         tag=""; is_tag=false; tag_version=""
