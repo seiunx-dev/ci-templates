@@ -311,7 +311,7 @@ jobs:
          {"label":"macos-arm64","os":"macos-latest","target":"aarch64-apple-darwin","layout":"flat"},
          {"label":"windows-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]
     secrets:
-      build-secret-1: ${{ github.token }} # always non-empty; the guard must pass
+      build-secret-1: guard-ok-nonempty # literal, non-empty: the require-build-secrets guard must pass
 
   # Checks the archives rust-release produced (names, formats, layout, contents).
   release-assets:
