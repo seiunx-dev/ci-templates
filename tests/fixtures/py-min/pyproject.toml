@@ -5,6 +5,11 @@ description = "Fixture for the ci-templates self-test"
 requires-python = ">=3.12"
 dependencies = []
 
+# ruff under an optional extra: the template must still run the locked ruff (it is not in the
+# default sync).
+[project.optional-dependencies]
+lint = ["ruff==0.15.12"]
+
 [dependency-groups]
 dev = ["pytest>=8"]
 

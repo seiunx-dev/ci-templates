@@ -2,6 +2,10 @@
 
 本仓库按 [版本策略](README.md#版本策略) 发布：`v1.x.y` 不可变，`v1` 跟随最新的 `v1.x.y`。
 
+## v1.1.7 — 2026-10-01
+
+- `python-uv-ci.yml` 的 ruff 步骤：uv.lock 里有 ruff 时改为 `uvx ruff@<锁定版本>`，不再用 `uv run --frozen ruff`。`uv run` 只同步默认依赖组，ruff 写在 optional extra（如 `[project.optional-dependencies] dev`）里时根本没装，lint job 报 `Failed to spawn: ruff`（MejiroRina/lambda-sekai-asset-unpack）。现在不管 ruff 由哪个 extra / group 引入，用的都是锁定的版本；没有锁定时仍是 `uvx ruff`。py-min fixture 把 ruff 放进 optional extra `lint`，覆盖这种情况。
+
 ## v1.1.6 — 2026-10-01
 
 - `go-ci.yml`：去掉工作流级的 `GOTOOLCHAIN: local`。setup-go 只在 `GOTOOLCHAIN` 还没被设成 `local` 时才读 go.mod 的 `toolchain` 行，于是一直装的是 `go` 行的版本：MejiroRina/sekai-diarkis（`go 1.25.0` + `toolchain go1.25.1`）的 CI 跑在 go1.25.0 上，发布却用 golang:1.25.1 构建。setup-go 选好版本后会自己导出 `GOTOOLCHAIN=local`，后续步骤仍不会下载别的工具链。`go-release.yml` 只在构建步骤上设置，本来就对。go-min fixture 改成 `go 1.27.0` + `toolchain go1.27.1`，新测试要求 `runtime.Version()` 等于 toolchain 行。（#11）
