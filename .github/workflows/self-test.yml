@@ -105,6 +105,7 @@ jobs:
       working-directory: tests/fixtures/go-min
       postgres-image: postgres:17-alpine
       env: EXPECT_SERVICES=1
+      test-args: -count=1 -v
       coverage: true
       coverage-threshold: "50"
 
@@ -179,17 +180,26 @@ jobs:
           set -euo pipefail
           ls -l assets
           base="rust-min-$VERSION"
-          for f in assets/*.tar.gz; do echo "== $f"; tar -tzf "$f"; done
-          echo "== zip"; unzip -Z1 "assets/$base-windows-x64.zip"
-          tar -tzf "assets/$base-linux-x64.tar.gz" | grep -qx "$base-linux-x64/docs/Cargo.toml"
-          tar -tzf "assets/$base-linux-x64.tar.gz" | grep -qx "$base-linux-x64/rust-min"
-          tar -tzf "assets/$base-linux-x64-glibc217.tar.gz" | grep -qx "$base-linux-x64-glibc217/LICENSE"
-          tar -tzf "assets/$base-macos-arm64.tar.gz" | grep -qx "rust-min"   # flat layout
-          unzip -Z1 "assets/$base-windows-x64.zip" | grep -qx "$base-windows-x64/rust-min.exe"
-          # zigbuild leg must not need glibc newer than 2.17
+          has() {  # has <listing> <entry>; no `| grep -q` (SIGPIPE under pipefail)
+            if ! grep -qxF -- "$2" <<< "$1"; then echo "::error::missing $2"; echo "$1"; exit 1; fi
+          }
+          linux=$(tar -tzf "assets/$base-linux-x64.tar.gz")
+          has "$linux" "$base-linux-x64/rust-min"
+          has "$linux" "$base-linux-x64/LICENSE"
+          has "$linux" "$base-linux-x64/docs/Cargo.toml"
+          zig=$(tar -tzf "assets/$base-linux-x64-glibc217.tar.gz")
+          has "$zig" "$base-linux-x64-glibc217/rust-min"
+          mac=$(tar -tzf "assets/$base-macos-arm64.tar.gz")
+          has "$mac" "rust-min"   # layout: flat
+          has "$mac" "docs/Cargo.toml"
+          win=$(unzip -Z1 "assets/$base-windows-x64.zip")
+          has "$win" "$base-windows-x64/rust-min.exe"
+          has "$win" "$base-windows-x64/docs/Cargo.toml"
+          # the zigbuild leg must not need a glibc newer than 2.17
           tar -xzf "assets/$base-linux-x64-glibc217.tar.gz" -C "$RUNNER_TEMP"
-          max=$(objdump -T "$RUNNER_TEMP/$base-linux-x64-glibc217/rust-min" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -n1)
-          echo "highest glibc symbol: $max"
+          syms=$(objdump -T "$RUNNER_TEMP/$base-linux-x64-glibc217/rust-min")
+          max=$(grep -o 'GLIBC_[0-9.]*' <<< "$syms" | sort -uV | tail -n1)
+          echo "highest glibc symbol version: $max"
           [ "$(printf '%s\n' "$max" GLIBC_2.17 | sort -V | tail -n1)" = GLIBC_2.17 ]
 
   ci-ok:

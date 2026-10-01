@@ -1,4 +1,4 @@
-# Reusable workflow linter (actionlint + shellcheck on run: blocks). Cheap (~10 s); add it
+# Reusable workflow linter (actionlint + shellcheck on run: blocks; shellcheck comes with the runner image). Cheap (~10 s); add it
 # to every repo's CI so invalid YAML/expressions fail on the PR instead of silently
 # producing zero-job runs.
 name: Workflow lint
@@ -7,6 +7,7 @@ on:
   workflow_call:
     inputs:
       actionlint-version:
+        description: actionlint release (without the v), downloaded from rhysd/actionlint and checked against its checksums file.
         type: string
         default: 1.7.12
 
@@ -22,8 +23,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
-        with:
-          tool: actionlint@${{ inputs.actionlint-version }}
+      # taiki-e/install-action has no actionlint support (it falls back to cargo-binstall,
+      # which cannot find it), so download the release binary and verify its checksum.
+      - name: Install actionlint ${{ inputs.actionlint-version }}
+        env:
+          VERSION: ${{ inputs.actionlint-version }}
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "::error::unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
+          base="https://github.com/rhysd/actionlint/releases/download/v${VERSION}"
+          file="actionlint_${VERSION}_linux_${arch}.tar.gz"
+          dir="$RUNNER_TEMP/actionlint"; mkdir -p "$dir"; cd "$dir"
+          curl -fsSL --retry 3 -o "$file" "$base/$file"
+          curl -fsSL --retry 3 -o checksums.txt "$base/actionlint_${VERSION}_checksums.txt"
+          grep " ${file}\$" checksums.txt | sha256sum -c -
+          tar -xzf "$file" actionlint
+          echo "$dir" >> "$GITHUB_PATH"
       - name: actionlint
-        run: actionlint -color
+        run: |
+          shellcheck --version
+          actionlint -version
+          actionlint -color
