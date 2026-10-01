@@ -1,6 +1,6 @@
 # ci-templates
 
-Team-Haruki / MejiroRina / seiunx-dev 共用的 GitHub Actions 模板：13 个可复用工作流（`on: workflow_call`）加 6 个 composite action。各仓库只保留很薄的调用文件（`ci.yml`、`release.yml`，文档站是 `docs.yml`），构建逻辑都在这里维护，改一处，所有仓库一起生效。
+Team-Haruki / MejiroRina / seiunx-dev 共用的 GitHub Actions 模板：14 个可复用工作流（`on: workflow_call`）加 6 个 composite action。各仓库只保留很薄的调用文件（`ci.yml`、`release.yml`，文档站是 `docs.yml`），构建逻辑都在这里维护，改一处，所有仓库一起生效。
 
 Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-templates/.github/workflows/<name>.yml@v1`.
 
@@ -14,8 +14,9 @@ Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-te
 | `.github/workflows/go-ci.yml` | gofmt、vet、staticcheck（带 `(compile)` 防护）、`go mod tidy -diff`、`test -race`（可同时出覆盖率并设阈值）、可选 bun 前端 |
 | `.github/workflows/python-uv-ci.yml` | ruff check / format、`uv sync --locked`、测试（可做 Python 版本矩阵）、可选 `uv build` |
 | `.github/workflows/node-ci.yml` | bun / npm / pnpm：lint、typecheck、test、build，外加带浏览器缓存的 Playwright e2e |
-| `.github/workflows/sonar.yml` | 只做扫描：下载 `coverage-*` 构件后扫描，按下载到的文件自动传 `-Dsonar.*.reportPaths`；拿不到 `SONAR_TOKEN`（Dependabot、fork PR）时直接跳过，不报红 |
-| `.github/workflows/docker.yml` | buildx 构建并推送到 GHCR。PR 只构建不推送；main 推 `:main`、`:sha-<完整 sha>`、`:sha-<7 位>`；tag 可以把 main 构建的镜像直接重打 tag（promote），不重建 |
+| `.github/workflows/sonar.yml` | 只做扫描：下载 `coverage-*` 构件后扫描，按下载到的文件自动传 `-Dsonar.*.reportPaths`；忽略 `.github/workflows/**` 里的 githubactions:S7637（`@v1` 引用），并和仓库已有的 multicriteria 合并；拿不到 `SONAR_TOKEN`（Dependabot、fork PR）时直接跳过，不报红 |
+| `.github/workflows/docker.yml` | buildx 构建并推送到 GHCR。PR 只构建不推送；main 推 `:sha-<完整 sha>`、`:sha-<7 位>`，`:main` 默认一起推，设 `defer-moving-tags: true` 时留给 `docker-retag.yml` 在 "CI OK" 之后再移；tag 可以把 main 构建的镜像直接重打 tag（promote），不重建 |
+| `.github/workflows/docker-retag.yml` | 把 `:main` 等移动 tag 指向已推送的 digest（`imagetools create`，不重建）；放在 `ci-ok` 之后，带新旧 commit 顺序保护 |
 | `.github/workflows/release-gate.yml` | 发布的第一步：检查 tag 与 manifest 中的版本一致，并等待被打 tag 的 commit 上 "CI OK" 变绿 |
 | `.github/workflows/rust-release.yml` | 按 target 矩阵构建（cargo / zigbuild / cross / ndk），打包成 tar.gz 或 zip 构件（保留 1 天） |
 | `.github/workflows/go-release.yml` | 在单个 job 里交叉编译多平台并打包 |
@@ -31,7 +32,8 @@ Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-te
 | `actions/package-archive` | 跨平台打包（Linux / macOS / Windows） |
 | `actions/cargo-publish` | 按顺序发布 crate，已发布的跳过，并等 index 可见后再发下一个 |
 | `tools/check_callers.py` | 静态检查：YAML 语法、调用方传的 inputs/secrets 与模板声明是否对得上、每个 job 是否有 timeout、第三方 action 是否 pin 到 SHA |
-| `tests/fixtures/` | 自测用的最小 Rust / Python / Go / npm / bun 项目 |
+| `tests/fixtures/` | 自测用的最小 Rust / Python / Go / npm / bun / Docker 项目 |
+| `tests/sonar_args_test.py` | `sonar.yml` 参数构建步骤的单元测试（直接取工作流里的脚本运行） |
 
 ## 怎么调用
 
@@ -71,13 +73,14 @@ jobs:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}   # 跨 owner 调用时 secrets: inherit 无效，必须显式传入
 
   docker:
-    name: Docker
-    needs: [rust]
+    name: Docker           # 不 needs 测试：和测试并行，main 上只推 :sha-*
     permissions:
       contents: read
       packages: write
       pull-requests: read
     uses: seiunx-dev/ci-templates/.github/workflows/docker.yml@v1
+    with:
+      defer-moving-tags: true
 
   ci-ok:
     name: CI OK            # 分支保护里唯一的 required check
@@ -88,6 +91,19 @@ jobs:
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
+
+  docker-tags:
+    name: Docker tags      # CI OK 通过后才把 :main 移到这次的镜像，不重建
+    needs: [docker, ci-ok]
+    if: needs.docker.outputs.deferred-tags != ''
+    permissions:
+      contents: read
+      packages: write
+    uses: seiunx-dev/ci-templates/.github/workflows/docker-retag.yml@v1
+    with:
+      image: ${{ needs.docker.outputs.image }}
+      digest: ${{ needs.docker.outputs.digest }}
+      tags: ${{ needs.docker.outputs.deferred-tags }}
 ```
 
 ```yaml
@@ -143,7 +159,9 @@ jobs:
 
 ## 约定（已写进模板）
 
-- **两个工作流**：`CI`（push main、pull_request main、workflow_dispatch）和 `Release`（push tags `v*`；workflow_dispatch 用作 dry run，构建全部产物但不发布任何东西）。Docker 构建放在 CI 里，并且 `needs` 测试，所以 main 上只会推送测试通过的镜像。
+- **两个工作流**：`CI`（push main、pull_request main、workflow_dispatch）和 `Release`（push tags `v*`；workflow_dispatch 用作 dry run，构建全部产物但不发布任何东西）。
+- **Docker 不等测试**（v1.1.0 起）：CI 里的 docker job 不 `needs` 测试，和测试并行，`defer-moving-tags: true`。main 上构建完立刻推不可变的 `:sha-<完整 sha>`、`:sha-<7 位>`（和 `:buildcache`）；`:main` 这类移动 tag 由 `ci-ok` 之后的 `docker-retag.yml` job 移过去（重打 tag，不重建），所以 `:main` 只会指向 "CI OK" 通过的 commit，但会比 `:sha-*` 晚到（晚多少取决于测试和 Sonar 比镜像构建慢多少）。部署要尽早拿到镜像就 pin `:sha-<7 位>`。测试失败的 commit 也会留下 `:sha-*` 镜像，但它没有 "CI OK"，release-gate 不会放行它的 tag。只有 docker 构建要用测试 job 产出的构件（`artifact-name`）时才保留 `needs`。
+- **Release 不变**：release-gate 等被打 tag 的 commit 上 "CI OK" 变绿（docker 在 `ci-ok` 的 needs 里，所以 `:sha-<sha>` 一定已经在），`promote-on-tag` 再把它重打成 `:X.Y.Z` / `:X.Y` / `:latest`。
 - **唯一的 required check 是 `CI OK`**：它是 `ci-ok` 聚合 job，`needs` 其余所有 job；有 job failure 或 cancelled 就失败，skipped 视为通过。
 - **concurrency**：PR 用 `${workflow}-pr-<PR号>` 并 cancel-in-progress；其他事件用 `${workflow}-<事件>-<sha>`，每个 commit 一组。不能用 `ref` 分组：同组里排队中的 run 会被更新的 run 顶掉（即使 cancel-in-progress 是 false），连续 push 三次时中间那个 commit 就没有 "CI OK" 和 `:sha-<sha>` 镜像，给它打 tag 会让 gate 失败。Release 用 `release-${ref}`，从不取消。可复用工作流内部不定义 concurrency：被调用的工作流里 `github.workflow` 取到的是调用方的名字，自己再定义会和调用方的 group 撞上导致死锁。
 - **权限**：顶层 `contents: read`。只有需要写权限的 job 才提权：Docker job 给 `packages: write`（PR 上不 login、不 push），发布 job 给 `contents: write`，PyPI/npm 发布 job 给 `id-token: write`，gate job 给 `checks: read`。
@@ -189,8 +207,9 @@ jobs:
   - 服务测试会真的连一次端口，并断言 `image: ''` 的那个服务没有启动；
   - sonar：不传 token，验证跳过路径是绿的；release-gate：dry run；
   - rust-release：cargo（linux/macOS/Windows）+ zigbuild（glibc 2.17），随后检查产物文件名、tar.gz/zip、dir/flat 布局、额外文件和 glibc 符号版本；
-  - docker：只在 PR 上跑（构建 amd64 + arm64，不登录、不推送，覆盖 pr-paths 过滤）；pages：只构建（`deploy: false`）。
-- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 push / promote 路径。
+  - docker：PR 上构建 amd64 + arm64（不登录、不推送，覆盖 pr-paths 过滤）；push main 和 workflow_dispatch 时走 `defer-moving-tags` 推送路径，镜像是一次性的 `ghcr.io/seiunx-dev/ci-templates-selftest`：先检查 `:sha-*` 已推、分支 tag 没动，过一个替身 "CI OK" job，再用 `docker-retag.yml` 移分支 tag，最后检查分支 tag 指向同一个 digest（没有重建）；pages：只构建（`deploy: false`）。
+  - sonar：`tests/sonar_args_test.py` 单元测试参数构建（multicriteria 合并、properties 语法、`project-version: auto`、report paths）。
+- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径、`docker-retag.yml` 的“tag 已指向更新的 commit”分支（由脚本桩测试覆盖，不在 CI 里）。
 
 ## 迁移前检查
 
@@ -214,6 +233,8 @@ python3 tools/check_callers.py --callers DIR --clones CLONES_DIR
 ## 已知限制
 
 - PyPI trusted publishing、npm provenance 不能在可复用工作流内部完成，发布 job 留在调用方。trusted publisher 绑定的是 **workflow 文件名**：发布从别的文件挪到 release.yml 的仓库，要在第一次打 tag 之前到 PyPI 为 release.yml（environment `pypi`）新增 trusted publisher。
+- `sonar.yml` 用命令行 `-Dsonar.issue.ignore.multicriteria=...` 加 S7637 的忽略，命令行会覆盖 sonar-project.properties 里的同名键，所以模板先读出 properties（或 `-Dproject.settings=` 指定的文件）和 `args` 里已有的 id 再追加 `ciTemplatesPins`。只在 SonarQube Cloud 网页上配置的 multicriteria 读不到，会被这次扫描的参数盖掉；这类规则要写进 sonar-project.properties。
+- `docker-retag.yml` 的顺序保护靠镜像的 `org.opencontainers.image.revision` label 和 compare API；两个 run 同时移同一个 tag 仍有极小的竞态窗口，最坏结果是 `:main` 暂时落后一个 commit，下一次 main 合并会纠正。
 - `docker.yml` 的 `latest: auto` 用 `git ls-remote` 找最高 semver tag；私有仓库匿名 ls-remote 会失败，此时回退为“稳定 tag 一律打 latest”。补打旧版本的 tag 时，私有仓库要显式传 `latest: false`。（自测在 public 仓库里，测不到这条路径。）
 - 已在 GitHub 上实测：`image: ''` 的服务容器会被跳过（日志："will not be started because the container definition has an empty image"），`container: ''` 的 job 直接跑在 runner 上。
 - 服务容器和 `container:` 只在 Linux runner 上可用。rust-ci 在没有服务和容器时走不带 `services:`/`container:` 的 job 变体，所以同一模板能跑 Windows/macOS；两个变体的步骤通过 YAML anchor 共用。
@@ -341,9 +362,10 @@ Job：`Scan`。只下载 `coverage-*` 构件并扫描；无 token 时绿色跳�
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `coverage-pattern` | string | `coverage-*` | Artifact name pattern to download into coverage/ (empty = none). |
-| `project-version` | string | `''` | sonar.projectVersion (leave empty; do not hard-code it in sonar-project.properties). |
+| `project-version` | string | `''` | sonar.projectVersion。空 = 不传；`auto` = 读根目录 Cargo.toml（`[package]` 或 `[workspace.package]`）/ package.json / pyproject.toml 的版本。不要写死在 sonar-project.properties 里。 |
 | `args` | string | `''` | Extra scanner arguments (e.g. -Dsonar.qualitygate.wait=true). |
 | `report-paths` | boolean | `true` | Pass the report path of every downloaded coverage file (see header). |
+| `ignore-template-pins` | boolean | `true` | 忽略 `.github/workflows/**` 里的 githubactions:S7637（要求 full SHA pin），`@v1` 模板引用不再拉低 Security Rating；和仓库已有的 multicriteria 合并（见“已知限制”）。 |
 | `timeout-minutes` | number | `15` | job 超时（分钟）。 |
 
 secrets: `SONAR_TOKEN`
@@ -364,6 +386,7 @@ Job：`Build and push`。调用方 job 权限：`contents: read`、`packages: wr
 | `tag-prefix` | string | `v` | Git tag prefix for release tags (v, engine-v, ...). |
 | `latest` | string | `auto` | auto (stable tag that is the highest semver tag with this prefix) \| true \| false |
 | `extra-tags` | string | `''` | Extra docker/metadata-action tag rules, one per line. |
+| `defer-moving-tags` | boolean | `false` | 分支 push 只推 `:sha-*`，移动 tag（`:<branch>`、非 sha 的 extra tag）放进 `deferred-tags` 输出，由 `docker-retag.yml` 在 CI OK 之后移。PR 和 tag push 不受影响。 |
 | `promote-on-tag` | boolean | `false` | On tag pushes, re-tag the :sha-<sha> image instead of rebuilding. |
 | `promote-wait-minutes` | number | `0` | How long to wait for the :sha-<sha> image to appear before building instead. |
 | `pr-paths` | string | `''` | Glob patterns (one per line, ** allowed). When set, PR builds run only if a matching file changed. |
@@ -379,7 +402,22 @@ Job：`Build and push`。调用方 job 权限：`contents: read`、`packages: wr
 | `runs-on` | string | `ubuntu-latest` | Runner 标签。 |
 | `timeout-minutes` | number | `45` | job 超时（分钟）。 |
 
-outputs: `image`, `digest`, `version`
+outputs: `image`, `digest`, `version`, `deferred-tags`（没推的移动 tag，每行一个完整引用；没有则为空）
+
+### `docker-retag.yml` — Docker retag
+
+Job：`Move tags`。调用方 job 权限：`contents: read`、`packages: write`。用 `docker buildx imagetools create` 把 tag 指向已在 registry 里的 digest，不重建。放在 `ci-ok` 之后（`needs: [docker, ci-ok]`，`if: needs.docker.outputs.deferred-tags != ''`）。移动前读出 tag 当前镜像的 `org.opencontainers.image.revision`，用 compare API 判断：已经指向更新的 commit 就跳过（并发的 main run 乱序结束时不会把 `:main` 往回拨）。
+
+| input | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `image` | string | `''` | 镜像名。空 = ghcr.io/<owner>/<repo>（小写）。 |
+| `digest` | string | `''` | 要打 tag 的 digest（sha256:...）。空 = 本 commit 的 `:sha-<sha>`。 |
+| `tags` | string | 必填 | 每行一个 tag，完整引用（image:tag）或只写 tag 名。 |
+| `registry` | string | `''` | 登录的 registry。空 = `image` 的 host 部分。 |
+| `check-ancestry` | boolean | `true` | tag 已指向更新的 commit 构建的镜像时跳过。 |
+| `timeout-minutes` | number | `10` | job 超时（分钟）。 |
+
+outputs: `moved`（实际移动的 tag，每行一个）
 
 ### `release-gate.yml` — Release gate
 
