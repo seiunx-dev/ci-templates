@@ -1,5 +1,6 @@
 # Point moving image tags (:main, ...) at an image that is already in the registry, without
-# rebuilding (`docker buildx imagetools create`). Companion of docker.yml's
+# rebuilding (`docker buildx imagetools create --prefer-index=false`: the tag gets exactly the
+# given digest). Companion of docker.yml's
 # `defer-moving-tags: true`: the image job pushes only :sha-* tags in parallel with the tests,
 # and this job, placed after the aggregate "CI OK" job, moves the branch tag once CI passed.
 #
@@ -132,7 +133,9 @@ jobs:
           done <<< "$TAGS"
 
           if [ "${#args[@]}" -gt 0 ]; then
-            docker buildx imagetools create "${args[@]}" "$src"
+            # --prefer-index=false: a single-platform image is tagged as the same manifest (same
+            # digest) instead of being wrapped in a new one-entry index; an index is copied as is.
+            docker buildx imagetools create --prefer-index=false "${args[@]}" "$src"
             printf 'Moved to %s:\n%s' "$src" "$moved"
           else
             echo "No tag to move."
