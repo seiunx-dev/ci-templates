@@ -171,7 +171,7 @@ jobs:
 - **权限**：顶层 `contents: read`。只有需要写权限的 job 才提权：Docker job 给 `packages: write`（PR 上不推送；`cache-backend: registry` 时 PR 只登录读取 `:buildcache`），发布 job 给 `contents: write`，PyPI/npm 发布 job 给 `id-token: write`，gate job 给 `checks: read`。
 - **每个 job 都有 timeout-minutes**：检查类 15–20 分钟，覆盖率 30，Docker 45，Release 构建 45–60，发布 10。
 - **缓存只从默认分支写**：rust-cache 用 `save-if`；Go 用 restore/save 两段式；docker 的 `cache-to` 只在默认分支上设置，gha 缓存按镜像名分 scope，重型 Rust 镜像用 registry `:buildcache`。PR 和 tag 只读缓存。rust-release 默认 `cache: false`：tag 上写不了缓存；需要热缓存时设 `cache: true`，并在 main 上手动跑一次 Release（dry run）预热。
-- **构件保留期很短**：覆盖率 3 天，release 中间产物 1 天，docker build record 3 天。
+- **构件保留期很短**：覆盖率 3 天，release 中间产物 1 天，docker build record 3 天。私有仓库的构件占账号的存储配额（配额满了，账号下所有 upload-artifact 都失败，Release 也发不出去），docker job 设 `build-record: false` 不上传 build record。
 - **版本号只写在 manifest 里**（Cargo.toml / pyproject / package.json），先提 bump PR，合并后再打 tag。gate 会拒绝 tag 与 manifest 不一致的发布。虚拟 workspace（根 Cargo.toml 没有版本）要设 `version-path` 或加 `[workspace.package] version`。
 - **测试只跑一遍**：开启 coverage 时，测试本身就在 llvm-cov / `-coverprofile` / coverage.py 下运行，结果上传为 `coverage-<lang>` 构件，由 `sonar.yml` 下载后扫描。`extra-test-command` 跑 `--ignored` 测试时一定带测试名过滤。
 - **服务**：`postgres-image` / `redis-image` 为空时服务不启动（GitHub 会跳过 `image: ''` 的服务容器）。测试通过 `CI_POSTGRES_URL` / `CI_REDIS_URL` 拿地址，用 `env:` 输入映射到项目自己的变量名（`MY_DSN=${CI_POSTGRES_URL}`）。容器模式（rust-ci `container:`）下主机名自动换成服务名。
@@ -211,7 +211,7 @@ jobs:
   - 服务测试会真的连一次端口，并断言 `image: ''` 的那个服务没有启动；
   - sonar：不传 token，验证跳过路径是绿的；release-gate：dry run；
   - rust-release：cargo（linux/macOS/Windows）+ zigbuild（glibc 2.17），随后检查产物文件名、tar.gz/zip、dir/flat 布局、额外文件和 glibc 符号版本；
-  - docker：PR 上构建 amd64 + arm64（不推送；用 registry 缓存，覆盖只读登录和 pr-paths 过滤）；push main 和 workflow_dispatch 时走 `defer-moving-tags` 推送路径，镜像是一次性的 `ghcr.io/seiunx-dev/ci-templates-selftest`：先检查 `:sha-*` 已推、分支 tag 没动，过一个替身 "CI OK" job，再用 `docker-retag.yml` 移分支 tag，最后检查分支 tag 指向同一个 digest（没有重建）；pages：只构建（`deploy: false`）。
+  - docker：PR 上构建 amd64 + arm64（不推送；用 registry 缓存，覆盖只读登录和 pr-paths 过滤）；两个 docker job 都设 `build-record: false`，随后检查本次 run 没有 `.dockerbuild` 构件；push main 和 workflow_dispatch 时走 `defer-moving-tags` 推送路径，镜像是一次性的 `ghcr.io/seiunx-dev/ci-templates-selftest`：先检查 `:sha-*` 已推、分支 tag 没动，过一个替身 "CI OK" job，再用 `docker-retag.yml` 移分支 tag，最后检查分支 tag 指向同一个 digest（没有重建）；pages：只构建（`deploy: false`）。
   - sonar：`tests/sonar_args_test.py` 单元测试参数构建（multicriteria 合并、properties 语法、`project-version: auto`、report paths）。
 - 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖；`verify-version` 的事件 / ref 组合（只有 tag push 发布）由 `tests/verify_version_test.sh` 覆盖。
 
@@ -398,6 +398,7 @@ Job：`Build and push`。调用方 job 权限：`contents: read`、`packages: wr
 | `cache-mode` | string | `min` | min \| max (max also caches intermediate stages, e.g. cargo-chef cook) |
 | `provenance` | string | `false` | build-push-action provenance (false keeps GHCR free of unknown/unknown manifests). |
 | `sbom` | string | `false` | build-push-action 的 sbom。 |
+| `build-record` | boolean | `true` | 上传 build record 构件（`<owner>~<repo>~<id>.dockerbuild`，保留 3 天）。私有仓库设 `false`：构件存储按账号计配额，配额满了之后整个账号所有工作流的 upload-artifact 都会失败。 |
 | `artifact-name` | string | `''` | Same-run workflow artifact to download before the build (e.g. prebuilt binaries). Supports a glob pattern. |
 | `artifact-path` | string | `dist` | Where to put the downloaded artifact (relative to the repo root). |
 | `artifact-merge` | boolean | `true` | Merge multiple matching artifacts into artifact-path (false = one sub-directory per artifact). |
