@@ -2,6 +2,11 @@
 
 本仓库按 [版本策略](README.md#版本策略) 发布：`v1.x.y` 不可变，`v1` 跟随最新的 `v1.x.y`。
 
+## v1.1.4 — 2026-10-01
+
+- `docker.yml`：`cache-backend: registry` 时，PR 构建也登录 GHCR（只读 `:buildcache`，仍然不推送）。私有仓库的镜像不能匿名读取，之前 PR 上缓存导入失败（`failed to fetch anonymous token`），每次都是冷构建（MejiroRina/kinagi-api 的 PR 构建 13 分钟，cargo-chef 的依赖层完全没用上）。同仓库 PR 登录失败会报错；fork 和 Dependabot 的 token 可能没有 `packages: read`，登录失败时只是退回无缓存构建。gha 缓存和 public 仓库不受影响。
+- 自测的 PR docker 构建改用 registry 缓存，覆盖这一步。
+
 ## v1.1.3 — 2026-10-01
 
 - `actions/verify-version`（release-gate）：只有 tag 的 **push** 事件才算发布（`is-tag=true`、输出 `tag`）。之前在 tag 上手动触发 `workflow_dispatch` 也会得到 `is-tag=true`，调用方的 promote 和 GitHub Release job 会真的发布，违背"dispatch = dry run"的约定。现在这种运行只打一条 notice，按 manifest 版本构建，不发布。tag push 的行为不变。

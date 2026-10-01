@@ -168,7 +168,7 @@ jobs:
 - **Release 不变**：release-gate 等被打 tag 的 commit 上 "CI OK" 变绿（docker 在 `ci-ok` 的 needs 里，所以 `:sha-<sha>` 一定已经在），`promote-on-tag` 再把它重打成 `:X.Y.Z` / `:X.Y` / `:latest`。
 - **唯一的 required check 是 `CI OK`**：它是 `ci-ok` 聚合 job，`needs` 其余所有 job；有 job failure 或 cancelled 就失败，skipped 视为通过。
 - **concurrency**：PR 用 `${workflow}-pr-<PR号>` 并 cancel-in-progress；其他事件用 `${workflow}-<事件>-<sha>`，每个 commit 一组。不能用 `ref` 分组：同组里排队中的 run 会被更新的 run 顶掉（即使 cancel-in-progress 是 false），连续 push 三次时中间那个 commit 就没有 "CI OK" 和 `:sha-<sha>` 镜像，给它打 tag 会让 gate 失败。Release 用 `release-${ref}`，从不取消。可复用工作流内部不定义 concurrency：被调用的工作流里 `github.workflow` 取到的是调用方的名字，自己再定义会和调用方的 group 撞上导致死锁。
-- **权限**：顶层 `contents: read`。只有需要写权限的 job 才提权：Docker job 给 `packages: write`（PR 上不 login、不 push），发布 job 给 `contents: write`，PyPI/npm 发布 job 给 `id-token: write`，gate job 给 `checks: read`。
+- **权限**：顶层 `contents: read`。只有需要写权限的 job 才提权：Docker job 给 `packages: write`（PR 上不推送；`cache-backend: registry` 时 PR 只登录读取 `:buildcache`），发布 job 给 `contents: write`，PyPI/npm 发布 job 给 `id-token: write`，gate job 给 `checks: read`。
 - **每个 job 都有 timeout-minutes**：检查类 15–20 分钟，覆盖率 30，Docker 45，Release 构建 45–60，发布 10。
 - **缓存只从默认分支写**：rust-cache 用 `save-if`；Go 用 restore/save 两段式；docker 的 `cache-to` 只在默认分支上设置，gha 缓存按镜像名分 scope，重型 Rust 镜像用 registry `:buildcache`。PR 和 tag 只读缓存。rust-release 默认 `cache: false`：tag 上写不了缓存；需要热缓存时设 `cache: true`，并在 main 上手动跑一次 Release（dry run）预热。
 - **构件保留期很短**：覆盖率 3 天，release 中间产物 1 天，docker build record 3 天。
@@ -211,7 +211,7 @@ jobs:
   - 服务测试会真的连一次端口，并断言 `image: ''` 的那个服务没有启动；
   - sonar：不传 token，验证跳过路径是绿的；release-gate：dry run；
   - rust-release：cargo（linux/macOS/Windows）+ zigbuild（glibc 2.17），随后检查产物文件名、tar.gz/zip、dir/flat 布局、额外文件和 glibc 符号版本；
-  - docker：PR 上构建 amd64 + arm64（不登录、不推送，覆盖 pr-paths 过滤）；push main 和 workflow_dispatch 时走 `defer-moving-tags` 推送路径，镜像是一次性的 `ghcr.io/seiunx-dev/ci-templates-selftest`：先检查 `:sha-*` 已推、分支 tag 没动，过一个替身 "CI OK" job，再用 `docker-retag.yml` 移分支 tag，最后检查分支 tag 指向同一个 digest（没有重建）；pages：只构建（`deploy: false`）。
+  - docker：PR 上构建 amd64 + arm64（不推送；用 registry 缓存，覆盖只读登录和 pr-paths 过滤）；push main 和 workflow_dispatch 时走 `defer-moving-tags` 推送路径，镜像是一次性的 `ghcr.io/seiunx-dev/ci-templates-selftest`：先检查 `:sha-*` 已推、分支 tag 没动，过一个替身 "CI OK" job，再用 `docker-retag.yml` 移分支 tag，最后检查分支 tag 指向同一个 digest（没有重建）；pages：只构建（`deploy: false`）。
   - sonar：`tests/sonar_args_test.py` 单元测试参数构建（multicriteria 合并、properties 语法、`project-version: auto`、report paths）。
 - 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖；`verify-version` 的事件 / ref 组合（只有 tag push 发布）由 `tests/verify_version_test.sh` 覆盖。
 

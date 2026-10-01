@@ -5,7 +5,8 @@
 # so they resolve to the published v1 tag, not to this commit. A change under actions/ is
 # exercised here only after v1 has been moved (see README, "发布本仓库").
 #
-# docker.yml: on pull requests it builds without logging in or pushing. On pushes to main and
+# docker.yml: on pull requests it builds without pushing (it logs in only to read the registry
+# build cache, as private repos need). On pushes to main and
 # on workflow_dispatch it also runs the defer-moving-tags path against the throwaway image
 # ghcr.io/seiunx-dev/ci-templates-selftest: push :sha-* only, check the moving tag did not move,
 # pass a stand-in "CI OK" job, move the tag with docker-retag.yml and check it again.
@@ -132,8 +133,9 @@ jobs:
       test-command: bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage
       coverage-path: coverage/lcov.info
 
-  # Pull requests only: the PR path builds without logging in or pushing. Two platforms
-  # exercise the QEMU step; pr-paths exercises the changed-files filter.
+  # Pull requests only: the PR path builds without pushing. Two platforms exercise the QEMU
+  # step; pr-paths exercises the changed-files filter; cache-backend: registry exercises the
+  # read-only login and the import of the :buildcache that docker-push writes on main.
   docker:
     name: docker (PR build)
     if: github.event_name == 'pull_request'
@@ -147,12 +149,13 @@ jobs:
       context: tests/fixtures/docker
       platforms: linux/amd64,linux/arm64
       version-build-arg: APP_VERSION
+      cache-backend: registry
       pr-paths: |
         tests/fixtures/docker/**
         .github/workflows/docker.yml
         .github/workflows/self-test.yml
 
-  # Push path with deferred moving tags (never on PRs: no login there). Throwaway image only.
+  # Push path with deferred moving tags (never on PRs: PRs do not push). Throwaway image only.
   docker-push:
     name: docker (push, deferred tags)
     if: github.event_name != 'pull_request'

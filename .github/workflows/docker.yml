@@ -1,7 +1,8 @@
 # Reusable Docker build/publish to GHCR.
 #
 # Events:
-#   pull_request   build only (no login, no push); reads the cache, never writes it.
+#   pull_request   build only (no push); reads the cache, never writes it. With the registry
+#                  cache it logs in read-only, since a private image's cache needs auth.
 #                  With `pr-paths`, the build is skipped when no listed path changed.
 #   branch push    build + push :<branch>, :sha-<full sha> and :sha-<7 chars> (the short
 #                  form most deployments already pin); writes the build cache only from
@@ -23,8 +24,8 @@
 # images since it does not count against the 10 GB Actions cache quota).
 #
 # Caller job permissions: contents: read, packages: write, pull-requests: read
-# (packages: write is never used on pull_request runs: there is no login; fork and
-# Dependabot PR tokens are read-only anyway).
+# (packages: write is never used on pull_request runs: they only read the registry cache;
+# fork and Dependabot PR tokens are read-only anyway).
 name: Docker
 
 on:
@@ -243,6 +244,22 @@ jobs:
 
       - name: Log in to GHCR
         if: steps.paths.outputs.build == 'true' && github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # PR builds never push, but a private image's :buildcache cannot be read anonymously:
+      # without a login the registry cache import fails ("failed to fetch anonymous token")
+      # and every PR build of a private repo starts cold. Same-repo PRs must log in; fork and
+      # Dependabot tokens may lack packages: read, so for them a failed login only means an
+      # uncached build.
+      - name: Log in to GHCR (read the registry cache)
+        if: >-
+          steps.paths.outputs.build == 'true' && github.event_name == 'pull_request' &&
+          inputs.cache-backend == 'registry'
+        continue-on-error: ${{ github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]' }}
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
