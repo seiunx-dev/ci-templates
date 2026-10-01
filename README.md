@@ -10,7 +10,7 @@ Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-te
 
 | 路径 | 作用 |
 |---|---|
-| `.github/workflows/rust-ci.yml` | fmt、clippy `-D warnings`、test（可切到 cargo-llvm-cov 出覆盖率）、可选 MSRV / Postgres / Redis / 容器 / apt |
+| `.github/workflows/rust-ci.yml` | fmt、clippy `-D warnings`、test（可切到 cargo-llvm-cov 出覆盖率）、可选 MSRV / Postgres / Redis / 容器 / apt；`lint: false` 只跑测试（给其他 OS 的额外调用） |
 | `.github/workflows/go-ci.yml` | gofmt、vet、staticcheck（带 `(compile)` 防护）、`go mod tidy -diff`、`test -race`（可同时出覆盖率并设阈值）、可选 bun 前端 |
 | `.github/workflows/python-uv-ci.yml` | ruff check / format、`uv sync --locked`、测试（可做 Python 版本矩阵）、可选 `uv build` |
 | `.github/workflows/node-ci.yml` | bun / npm / pnpm：lint、typecheck、test、build，外加带浏览器缓存的 Playwright e2e |

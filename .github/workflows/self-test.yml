@@ -68,7 +68,7 @@ jobs:
     with:
       working-directory: tests/fixtures/rust-min
       runs-on: macos-latest
-      fmt: false
+      lint: false # test job only (the Linux calls lint the fixture)
       cache-key-prefix: selftest-mac
   # Postgres only: the empty redis-image service must be skipped and `container: ''` must run
   # on the runner. Also covers coverage mode, the artifact and extra-test-command.
