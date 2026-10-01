@@ -457,6 +457,7 @@ Job：`Build <label>`（每个 target 一个）。产物：构件 `release-<labe
 | `cargo-zigbuild-version` | string | `0.23.4` | zigbuild builder 用的 cargo-zigbuild 版本（固定）。 |
 | `build-env` | string | `''` | KEY=VALUE lines exported to the build step; {version} and {tag} are substituted. |
 | `build-secret-names` | string | `''` | Comma-separated env var names that receive secrets build-secret-1..3, in order (compile-time secrets). |
+| `require-build-secrets` | boolean | `false` | Fail the build step before compiling if any env var named in `build-secret-names` is empty (its `build-secret-N` was not passed). For compile-time secrets that must be baked in. |
 | `build-command` | string | `''` | Replace cargo build entirely (custom toolchains). Env: TARGET, LABEL, VERSION, PROFILE, BIN_DIR. The command must put the binaries into $BIN_DIR. |
 | `setup-command` | string | `''` | Shell hook before the build (e.g. fetch a pinned C++ engine). |
 | `apt-packages` | string | `''` | apt packages for Linux runners. |

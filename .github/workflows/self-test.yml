@@ -299,6 +299,9 @@ jobs:
       name: rust-min
       cargo-args: --manifest-path tests/fixtures/rust-min/Cargo.toml
       build-env: CARGO_TARGET_DIR=target
+      # Exercise the compile-time-secret guard: a non-empty secret must let the build proceed.
+      build-secret-names: GUARD_TEST_SECRET
+      require-build-secrets: true
       extra-files: |
         LICENSE
         tests/fixtures/rust-min/Cargo.toml=>docs/Cargo.toml
@@ -307,6 +310,8 @@ jobs:
          {"label":"linux-x64-glibc217","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu.2.17","builder":"zigbuild"},
          {"label":"macos-arm64","os":"macos-latest","target":"aarch64-apple-darwin","layout":"flat"},
          {"label":"windows-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]
+    secrets:
+      build-secret-1: ${{ github.token }} # always non-empty; the guard must pass
 
   # Checks the archives rust-release produced (names, formats, layout, contents).
   release-assets:

@@ -98,6 +98,13 @@ on:
         description: Comma-separated env var names that receive secrets build-secret-1..3, in order (compile-time secrets).
         type: string
         default: ""
+      require-build-secrets:
+        description: >-
+          Fail the build step before compiling if any env var named in build-secret-names is empty
+          (the matching build-secret-N was not passed). Use for compile-time secrets that must be
+          baked in, so a release never silently ships a binary built without them.
+        type: boolean
+        default: false
       build-command:
         description: >-
           Replace cargo build entirely (custom toolchains). Env: TARGET, LABEL, VERSION, PROFILE, BIN_DIR.
@@ -236,6 +243,7 @@ jobs:
           BUILD_ENV: ${{ inputs.build-env }}
           BUILD_COMMAND: ${{ inputs.build-command }}
           SECRET_NAMES: ${{ inputs.build-secret-names }}
+          REQUIRE_SECRETS: ${{ inputs.require-build-secrets }}
           SECRET_1: ${{ secrets.build-secret-1 }}
           SECRET_2: ${{ secrets.build-secret-2 }}
           SECRET_3: ${{ secrets.build-secret-3 }}
@@ -250,10 +258,18 @@ jobs:
           done <<< "$BUILD_ENV"
           # Compile-time secrets are exported only inside this step.
           IFS=, read -r -a secret_names <<< "$SECRET_NAMES"
+          guarded=0
           for i in "${!secret_names[@]}"; do
             var="SECRET_$((i + 1))"; n="$(echo "${secret_names[$i]}" | tr -d '[:space:]')"
-            [ -z "$n" ] || export "$n=${!var}"
+            [ -n "$n" ] || continue
+            if [ "$REQUIRE_SECRETS" = true ] && [ -z "${!var}" ]; then
+              echo "::error::compile-time secret for \$$n is empty (build-secret-$((i + 1)) not passed)"; exit 1
+            fi
+            export "$n=${!var}"; guarded=$((guarded + 1))
           done
+          if [ "$REQUIRE_SECRETS" = true ]; then
+            echo "compile-time secret guard: $guarded required secret(s) present"  # names only, never values
+          fi
           unset SECRET_1 SECRET_2 SECRET_3
           export BIN_DIR="$GITHUB_WORKSPACE/dist-bin"; mkdir -p "$BIN_DIR"
           export TARGET LABEL VERSION PROFILE
