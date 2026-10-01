@@ -6,8 +6,11 @@
 # only from the default branch, so GOCACHE is refreshed on every main push instead of
 # freezing at the first go.sum hit (the setup-go default).
 #
-# The Go version comes from go.mod (GOTOOLCHAIN=local, so a go.mod newer than the
-# installed toolchain fails instead of silently downloading another one).
+# The Go version comes from go.mod: its toolchain line when there is one, else the go line.
+# setup-go then exports GOTOOLCHAIN=local, so a go.mod newer than the installed toolchain fails
+# instead of silently downloading another one. GOTOOLCHAIN must not be set before setup-go:
+# with GOTOOLCHAIN=local already in the env, setup-go ignores the toolchain line and installs
+# the (older) go line, so CI would test on another Go than the release build uses.
 name: Go CI
 
 on:
@@ -95,9 +98,6 @@ on:
 
 permissions:
   contents: read
-
-env:
-  GOTOOLCHAIN: local
 
 jobs:
   lint:

@@ -283,7 +283,7 @@ Jobs：`Lint`（fmt + 每个 feature set 跑 clippy `-D warnings`）、`Test`（
 
 ### `go-ci.yml` — Go CI
 
-Jobs：`Lint`（gofmt、`go mod tidy -diff`、build、vet、staticcheck、可选 govulncheck）、`Test`（`go test -race`，可同时出 `coverage/go.out` 并设阈值，上传 `coverage-go`）、可选 `Frontend`（bun）。`GOTOOLCHAIN=local`，Go 版本取自 go.mod。
+Jobs：`Lint`（gofmt、`go mod tidy -diff`、build、vet、staticcheck、可选 govulncheck）、`Test`（`go test -race`，可同时出 `coverage/go.out` 并设阈值，上传 `coverage-go`）、可选 `Frontend`（bun）。Go 版本取自 go.mod：有 `toolchain` 行时用它，否则用 `go` 行；装好后 `GOTOOLCHAIN=local`（不会自动下载别的版本）。
 
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|

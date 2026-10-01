@@ -3,9 +3,26 @@ package gomin
 import (
 	"net"
 	"os"
+	"regexp"
+	"runtime"
 	"testing"
 	"time"
 )
+
+// go.mod says go 1.27.0 and toolchain go1.27.1: go-ci must install the toolchain line.
+func TestToolchainLine(t *testing.T) {
+	mod, err := os.ReadFile("go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^toolchain (go\S+)`).FindSubmatch(mod)
+	if m == nil {
+		t.Fatal("go.mod has no toolchain line")
+	}
+	if got := runtime.Version(); got != string(m[1]) {
+		t.Fatalf("tests run on %s, go.mod toolchain line says %s", got, m[1])
+	}
+}
 
 func TestAdd(t *testing.T) {
 	if Add(2, 2) != 4 {
