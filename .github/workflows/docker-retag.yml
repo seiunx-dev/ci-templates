@@ -56,13 +56,13 @@ on:
         description: Tags that were moved, one per line.
         value: ${{ jobs.retag.outputs.moved }}
 
-permissions:
-  contents: read
-
 jobs:
   retag:
     name: Move tags
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # compare API (ordering guard)
+      packages: write
     timeout-minutes: ${{ inputs.timeout-minutes }}
     outputs:
       moved: ${{ steps.retag.outputs.moved }}
