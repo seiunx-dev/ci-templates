@@ -1,0 +1,75 @@
+# Reusable first job of every release.yml.
+#   1. Resolves the version and, on a tag push, fails unless tag == <prefix><manifest version>.
+#   2. On a tag push, waits until the aggregate CI check ("CI OK") of the tagged commit is
+#      green, so a red commit is never released and the main-built image/artifacts exist.
+#      workflow_dispatch runs (dry runs) skip the wait.
+# Its outputs feed the build/publish jobs.
+name: Release gate
+
+on:
+  workflow_call:
+    inputs:
+      version-source:
+        description: "cargo | pyproject | package-json | file | none"
+        type: string
+        default: cargo
+      version-path:
+        description: Manifest path (default per source).
+        type: string
+        default: ""
+      version-extra-paths:
+        description: Other manifests that must carry the same version, one per line.
+        type: string
+        default: ""
+      tag-prefix:
+        type: string
+        default: v
+      require-check:
+        description: Check run that must be green on the tagged commit. Empty = do not wait.
+        type: string
+        default: CI OK
+      wait-minutes:
+        description: Maximum wait for the check (the job itself times out at 60).
+        type: number
+        default: 30
+    outputs:
+      version:
+        value: ${{ jobs.gate.outputs.version }}
+      tag:
+        value: ${{ jobs.gate.outputs.tag }}
+      is-tag:
+        description: "'true' on a tag push (publish), 'false' on a dry run."
+        value: ${{ jobs.gate.outputs.is-tag }}
+      prerelease:
+        value: ${{ jobs.gate.outputs.prerelease }}
+
+jobs:
+  gate:
+    name: Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      is-tag: ${{ steps.v.outputs.is-tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: v
+        uses: seiunx-dev/ci-templates/actions/verify-version@v1
+        with:
+          source: ${{ inputs.version-source }}
+          path: ${{ inputs.version-path }}
+          extra-paths: ${{ inputs.version-extra-paths }}
+          tag-prefix: ${{ inputs.tag-prefix }}
+      - name: Wait for CI on the tagged commit
+        if: steps.v.outputs.is-tag == 'true' && inputs.require-check != ''
+        uses: seiunx-dev/ci-templates/actions/wait-for-checks@v1
+        with:
+          check-name: ${{ inputs.require-check }}
+          timeout-minutes: ${{ inputs.wait-minutes }}

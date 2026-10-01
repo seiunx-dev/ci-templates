@@ -1,0 +1,217 @@
+# CI of the template repository itself: lints every file, then calls the reusable workflows
+# of this commit (./.github/workflows/x.yml) on the small fixtures under tests/fixtures/.
+#
+# Composite actions inside the templates are referenced as seiunx-dev/ci-templates/actions/x@v1,
+# so they resolve to the published v1 tag, not to this commit. A change under actions/ is
+# exercised here only after v1 has been moved (see README, "发布本仓库").
+#
+# Not exercised here (they publish or deploy): docker.yml (pushes to GHCR on push events),
+# gh-release.yml (creates a release), pages.yml (deploys), maturin-wheels.yml (slow; covered
+# by the first pilot repo), go-release.yml (needs go.mod at the repository root).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.event_name, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Workflow lint
+    uses: ./.github/workflows/actionlint.yml
+
+  yaml:
+    name: YAML and caller contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Parse every YAML file and check calls against workflow_call inputs
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user --break-system-packages pyyaml
+          python3 tools/check_callers.py
+
+  # rust-ci has two variants of each job: the plain one (no services:/container: keys) runs on
+  # Windows/macOS; the services/container one only on Linux.
+  rust-windows:
+    name: rust-ci on Windows
+    uses: ./.github/workflows/rust-ci.yml
+    with:
+      working-directory: tests/fixtures/rust-min
+      runs-on: windows-latest
+      fmt: false
+      cache-key-prefix: selftest-win
+  rust-macos:
+    name: rust-ci on macOS
+    uses: ./.github/workflows/rust-ci.yml
+    with:
+      working-directory: tests/fixtures/rust-min
+      runs-on: macos-latest
+      fmt: false
+      cache-key-prefix: selftest-mac
+  # Postgres only: the empty redis-image service must be skipped and `container: ''` must run
+  # on the runner. Also covers coverage mode, the artifact and extra-test-command.
+  rust-services:
+    name: rust-ci with Postgres + coverage
+    uses: ./.github/workflows/rust-ci.yml
+    with:
+      working-directory: tests/fixtures/rust-min
+      postgres-image: postgres:17-alpine
+      coverage: true
+      cache-key-prefix: selftest-cov
+      msrv: "1.85"
+      extra-test-command: $CARGO_TEST --locked -- --ignored service_postgres_reachable
+  # Container mode: both jobs in a Debian container, Redis reached by its service name.
+  rust-container:
+    name: rust-ci in a container + Redis
+    uses: ./.github/workflows/rust-ci.yml
+    with:
+      working-directory: tests/fixtures/rust-min
+      container: debian:trixie-slim
+      redis-image: redis:7-alpine
+      apt-packages: pkg-config
+      cache-key-prefix: selftest-ctr
+      extra-test-command: $CARGO_TEST --locked -- --ignored service_redis_reachable
+
+  # Redis only (empty postgres-image must be skipped), a Python matrix and uv build.
+  python:
+    name: python-uv-ci + Redis
+    uses: ./.github/workflows/python-uv-ci.yml
+    with:
+      working-directory: tests/fixtures/py-min
+      python-versions: '["3.12", "3.13"]'
+      redis-image: redis:7-alpine
+      env: |
+        EXPECT_REDIS=1
+        EXPECT_NO_POSTGRES=1
+      build-dist: true
+
+  # Postgres only (empty redis-image must be skipped), coverage + threshold.
+  go:
+    name: go-ci + Postgres
+    uses: ./.github/workflows/go-ci.yml
+    with:
+      working-directory: tests/fixtures/go-min
+      postgres-image: postgres:17-alpine
+      env: EXPECT_SERVICES=1
+      coverage: true
+      coverage-threshold: "50"
+
+  node-npm:
+    name: node-ci (npm)
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      working-directory: tests/fixtures/node-npm
+      upload-build: dist
+  node-bun:
+    name: node-ci (bun)
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      working-directory: tests/fixtures/node-bun
+      test-command: bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage
+      coverage-path: coverage/lcov.info
+
+  # No SONAR_TOKEN is passed: the scan must skip and stay green.
+  sonar:
+    name: Sonar (skip path)
+    needs: [rust-services, go, node-bun]
+    uses: ./.github/workflows/sonar.yml
+
+  gate:
+    name: Release gate (dry run)
+    uses: ./.github/workflows/release-gate.yml
+    permissions:
+      contents: read
+      checks: read
+    with:
+      version-source: cargo
+      version-path: tests/fixtures/rust-min/Cargo.toml
+      version-extra-paths: tests/fixtures/py-min/pyproject.toml
+
+  # One cargo target per OS plus a zigbuild leg with a glibc suffix. The fixture is not at the
+  # repository root, so the target dir is pointed back to ./target.
+  rust-release:
+    name: rust-release (dry run)
+    needs: gate
+    uses: ./.github/workflows/rust-release.yml
+    with:
+      version: ${{ needs.gate.outputs.version }}
+      tag: ${{ needs.gate.outputs.tag }}
+      name: rust-min
+      cargo-args: --manifest-path tests/fixtures/rust-min/Cargo.toml
+      build-env: CARGO_TARGET_DIR=target
+      extra-files: |
+        LICENSE
+        tests/fixtures/rust-min/Cargo.toml=>docs/Cargo.toml
+      targets: >-
+        [{"label":"linux-x64","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},
+         {"label":"linux-x64-glibc217","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu.2.17","builder":"zigbuild"},
+         {"label":"macos-arm64","os":"macos-latest","target":"aarch64-apple-darwin","layout":"flat"},
+         {"label":"windows-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]
+
+  # Checks the archives rust-release produced (names, formats, layout, contents).
+  release-assets:
+    name: Check release archives
+    needs: [gate, rust-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: assets
+          merge-multiple: true
+      - name: Inspect archives
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          ls -l assets
+          base="rust-min-$VERSION"
+          for f in assets/*.tar.gz; do echo "== $f"; tar -tzf "$f"; done
+          echo "== zip"; unzip -Z1 "assets/$base-windows-x64.zip"
+          tar -tzf "assets/$base-linux-x64.tar.gz" | grep -qx "$base-linux-x64/docs/Cargo.toml"
+          tar -tzf "assets/$base-linux-x64.tar.gz" | grep -qx "$base-linux-x64/rust-min"
+          tar -tzf "assets/$base-linux-x64-glibc217.tar.gz" | grep -qx "$base-linux-x64-glibc217/LICENSE"
+          tar -tzf "assets/$base-macos-arm64.tar.gz" | grep -qx "rust-min"   # flat layout
+          unzip -Z1 "assets/$base-windows-x64.zip" | grep -qx "$base-windows-x64/rust-min.exe"
+          # zigbuild leg must not need glibc newer than 2.17
+          tar -xzf "assets/$base-linux-x64-glibc217.tar.gz" -C "$RUNNER_TEMP"
+          max=$(objdump -T "$RUNNER_TEMP/$base-linux-x64-glibc217/rust-min" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -n1)
+          echo "highest glibc symbol: $max"
+          [ "$(printf '%s\n' "$max" GLIBC_2.17 | sort -V | tail -n1)" = GLIBC_2.17 ]
+
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs:
+      - lint
+      - yaml
+      - rust-windows
+      - rust-macos
+      - rust-services
+      - rust-container
+      - python
+      - go
+      - node-npm
+      - node-bun
+      - sonar
+      - gate
+      - rust-release
+      - release-assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

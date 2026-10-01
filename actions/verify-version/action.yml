@@ -1,0 +1,99 @@
+name: Verify version
+description: >-
+  Resolve the release version and, on a tag push, fail unless the tag equals
+  <tag-prefix><version declared in the manifest>. The version lives in the manifest
+  (bumped by a PR before tagging); CI never rewrites Cargo.toml/pyproject from the tag.
+inputs:
+  source:
+    description: "cargo | pyproject | package-json | file | none. 'none' takes the version from the tag only."
+    default: cargo
+  path:
+    description: Manifest path. Defaults per source (Cargo.toml, pyproject.toml, package.json, VERSION).
+    default: ""
+  extra-paths:
+    description: Additional manifests (same source syntax is auto-detected by file name) that must carry the same version, one per line.
+    default: ""
+  tag-prefix:
+    description: Tag prefix in front of the version (v, engine-v, ...).
+    default: v
+outputs:
+  version:
+    description: Version without prefix (e.g. 1.2.3 or 1.2.3-rc.1).
+    value: ${{ steps.v.outputs.version }}
+  tag:
+    description: Tag name when the run is a tag push, else empty.
+    value: ${{ steps.v.outputs.tag }}
+  is-tag:
+    description: "'true' on a tag push that matches the prefix."
+    value: ${{ steps.v.outputs.is-tag }}
+  prerelease:
+    description: "'true' when the version has a pre-release part (contains '-')."
+    value: ${{ steps.v.outputs.prerelease }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve and verify version
+      id: v
+      shell: bash
+      env:
+        SOURCE: ${{ inputs.source }}
+        MANIFEST: ${{ inputs.path }}
+        EXTRA: ${{ inputs.extra-paths }}
+        PREFIX: ${{ inputs.tag-prefix }}
+      run: |
+        set -euo pipefail
+        read_version() {
+          local file="$1"
+          case "$file" in
+            *Cargo.toml|*pyproject.toml)
+              python3 - "$file" <<'PY'
+        import sys, tomllib
+        data = tomllib.load(open(sys.argv[1], "rb"))
+        pkg = data.get("package") or data.get("project") or {}
+        v = pkg.get("version")
+        if isinstance(v, dict) or v is None:
+            v = data.get("workspace", {}).get("package", {}).get("version")
+        if v is None:
+            v = data.get("tool", {}).get("poetry", {}).get("version")
+        if not v:
+            sys.exit(f"no version in {sys.argv[1]}")
+        print(v)
+        PY
+              ;;
+            *package.json) python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$file" ;;
+            *) tr -d '[:space:]' < "$file"; echo ;;
+          esac
+        }
+        if [ -z "$MANIFEST" ]; then
+          case "$SOURCE" in
+            cargo) MANIFEST=Cargo.toml ;;
+            pyproject) MANIFEST=pyproject.toml ;;
+            package-json) MANIFEST=package.json ;;
+            file) MANIFEST=VERSION ;;
+          esac
+        fi
+        tag=""; is_tag=false; tag_version=""
+        if [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" == "$PREFIX"* ]]; then
+          tag="$GITHUB_REF_NAME"; is_tag=true; tag_version="${GITHUB_REF_NAME#"$PREFIX"}"
+        fi
+        if [ "$SOURCE" = none ]; then
+          version="${tag_version:-0.0.0-dev.${GITHUB_SHA::7}}"
+        else
+          version="$(read_version "$MANIFEST")"
+          while IFS= read -r extra; do
+            [ -n "$extra" ] || continue
+            other="$(read_version "$extra")"
+            if [ "$other" != "$version" ]; then
+              echo "::error file=$extra::version $other differs from $MANIFEST ($version)"; exit 1
+            fi
+          done <<< "$EXTRA"
+          if [ "$is_tag" = true ] && [ "$tag_version" != "$version" ]; then
+            echo "::error::tag $tag does not match $MANIFEST version $version (expected ${PREFIX}${version}). Bump the manifest in a PR before tagging."
+            exit 1
+          fi
+        fi
+        prerelease=false; [[ "$version" == *-* ]] && prerelease=true
+        {
+          echo "version=$version"; echo "tag=$tag"; echo "is-tag=$is_tag"; echo "prerelease=$prerelease"
+        } >> "$GITHUB_OUTPUT"
+        echo "version=$version tag=${tag:-<none>} prerelease=$prerelease"

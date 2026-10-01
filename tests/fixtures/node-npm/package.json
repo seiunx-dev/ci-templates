@@ -1,0 +1,11 @@
+{
+  "name": "node-npm-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "node --check index.js",
+    "test": "node --test",
+    "build": "node -e \"require('node:fs').mkdirSync('dist',{recursive:true});require('node:fs').copyFileSync('index.js','dist/index.js')\""
+  }
+}

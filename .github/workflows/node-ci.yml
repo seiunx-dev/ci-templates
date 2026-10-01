@@ -1,0 +1,272 @@
+# Reusable frontend / Node CI for bun, npm or pnpm projects: `check` (install with the
+# lockfile, then lint, typecheck, unit tests, build) and an optional Playwright `e2e`
+# job with a cached browser download.
+#
+# Each command input accepts `auto` (run `<pm> run <script>` when package.json has that
+# script), an explicit command, or '' to skip.
+name: Node CI
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        type: string
+        default: "."
+      package-manager:
+        description: "auto (from lockfile) | bun | npm | pnpm"
+        type: string
+        default: auto
+      node-version:
+        description: Node version (also used with bun for tools that need node). Empty = .nvmrc / .node-version when present, else 24.
+        type: string
+        default: ""
+      bun-version:
+        description: Bun version (e.g. 1.3.14). Empty = .bun-version or package.json packageManager.
+        type: string
+        default: ""
+      install-command:
+        description: Override the install command (default = frozen-lockfile install for the package manager).
+        type: string
+        default: ""
+      lint-command:
+        type: string
+        default: auto
+      typecheck-command:
+        type: string
+        default: auto
+      test-command:
+        description: "auto runs the `test` script. For coverage, pass e.g. `bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage`."
+        type: string
+        default: auto
+      build-command:
+        type: string
+        default: auto
+      coverage-path:
+        description: Coverage file to upload as coverage-js (e.g. coverage/lcov.info). It is renamed to lcov-js.info.
+        type: string
+        default: ""
+      e2e-command:
+        description: Playwright command (empty = no e2e job), e.g. "bunx playwright test".
+        type: string
+        default: ""
+      e2e-prepare-command:
+        description: Shell run before the e2e command (e.g. a build the tests serve).
+        type: string
+        default: ""
+      e2e-browsers:
+        description: Playwright browsers to install (space-separated).
+        type: string
+        default: chromium
+      e2e-xvfb:
+        description: Wrap the e2e command in xvfb-run (headed WebGL tests).
+        type: boolean
+        default: false
+      upload-build:
+        description: Path of build output to upload as artifact `build` (retention 3 days). Empty = no upload.
+        type: string
+        default: ""
+      runs-on:
+        type: string
+        default: ubuntu-latest
+      timeout-minutes:
+        type: number
+        default: 15
+      e2e-timeout-minutes:
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Detect package manager
+        id: pm
+        env:
+          PM: ${{ inputs.package-manager }}
+          NODE: ${{ inputs.node-version }}
+        run: |
+          pm="$PM"
+          if [ "$pm" = auto ]; then
+            if [ -f bun.lock ] || [ -f bun.lockb ]; then pm=bun
+            elif [ -f pnpm-lock.yaml ]; then pm=pnpm
+            else pm=npm; fi
+          fi
+          node="$NODE"
+          if [ -z "$node" ]; then
+            if [ -f .nvmrc ]; then node="$(cat .nvmrc)"; elif [ -f .node-version ]; then node="$(cat .node-version)"; else node=24; fi
+          fi
+          echo "pm=$pm" >> "$GITHUB_OUTPUT"; echo "node=$node" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ steps.pm.outputs.node }}
+          cache: ${{ steps.pm.outputs.pm != 'bun' && steps.pm.outputs.pm || '' }}
+          cache-dependency-path: ${{ inputs.working-directory }}/${{ steps.pm.outputs.pm == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
+      - name: Setup pnpm
+        if: steps.pm.outputs.pm == 'pnpm'
+        run: corepack enable pnpm
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: steps.pm.outputs.pm == 'bun'
+        with:
+          bun-version: ${{ inputs.bun-version }}
+          bun-version-file: ${{ inputs.bun-version == '' && format('{0}/package.json', inputs.working-directory) || '' }}
+      - name: Install dependencies
+        env:
+          PM: ${{ steps.pm.outputs.pm }}
+          INSTALL: ${{ inputs.install-command }}
+        run: |
+          if [ -n "$INSTALL" ]; then eval "$INSTALL"; exit 0; fi
+          case "$PM" in
+            bun) bun install --frozen-lockfile ;;
+            pnpm) pnpm install --frozen-lockfile ;;
+            npm) npm ci ;;
+          esac
+      - name: Lint, typecheck, test, build
+        env:
+          PM: ${{ steps.pm.outputs.pm }}
+          LINT: ${{ inputs.lint-command }}
+          TYPECHECK: ${{ inputs.typecheck-command }}
+          TEST: ${{ inputs.test-command }}
+          BUILD: ${{ inputs.build-command }}
+        run: |
+          set -euo pipefail
+          run_step() {
+            local label="$1" cmd="$2" script="$3"
+            if [ "$cmd" = auto ]; then
+              if jq -e --arg s "$script" '.scripts[$s] // empty' package.json >/dev/null; then cmd="$PM run $script"; else cmd=""; fi
+            fi
+            [ -n "$cmd" ] || { echo "skip $label"; return 0; }
+            echo "::group::$label: $cmd"; eval "$cmd"; echo "::endgroup::"
+          }
+          run_step lint "$LINT" lint
+          run_step typecheck "$TYPECHECK" typecheck
+          run_step test "$TEST" test
+          run_step build "$BUILD" build
+      - name: Stage coverage
+        if: inputs.coverage-path != ''
+        env:
+          SRC: ${{ inputs.coverage-path }}
+        run: mkdir -p "$GITHUB_WORKSPACE/coverage-js" && cp "$SRC" "$GITHUB_WORKSPACE/coverage-js/lcov-js.info"
+      - name: Upload coverage
+        if: inputs.coverage-path != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-js
+          path: coverage-js/
+          retention-days: 3
+          if-no-files-found: error
+      - name: Upload build
+        if: inputs.upload-build != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build
+          path: ${{ inputs.working-directory }}/${{ inputs.upload-build }}
+          retention-days: 3
+          if-no-files-found: error
+
+  e2e:
+    name: E2E
+    if: inputs.e2e-command != ''
+    needs: check
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.e2e-timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Detect package manager
+        id: pm
+        env:
+          PM: ${{ inputs.package-manager }}
+          NODE: ${{ inputs.node-version }}
+        run: |
+          pm="$PM"
+          if [ "$pm" = auto ]; then
+            if [ -f bun.lock ] || [ -f bun.lockb ]; then pm=bun
+            elif [ -f pnpm-lock.yaml ]; then pm=pnpm
+            else pm=npm; fi
+          fi
+          node="$NODE"
+          if [ -z "$node" ]; then
+            if [ -f .nvmrc ]; then node="$(cat .nvmrc)"; elif [ -f .node-version ]; then node="$(cat .node-version)"; else node=24; fi
+          fi
+          echo "pm=$pm" >> "$GITHUB_OUTPUT"; echo "node=$node" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ steps.pm.outputs.node }}
+          cache: ${{ steps.pm.outputs.pm != 'bun' && steps.pm.outputs.pm || '' }}
+          cache-dependency-path: ${{ inputs.working-directory }}/${{ steps.pm.outputs.pm == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
+      - name: Setup pnpm
+        if: steps.pm.outputs.pm == 'pnpm'
+        run: corepack enable pnpm
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: steps.pm.outputs.pm == 'bun'
+        with:
+          bun-version: ${{ inputs.bun-version }}
+          bun-version-file: ${{ inputs.bun-version == '' && format('{0}/package.json', inputs.working-directory) || '' }}
+      - name: Install dependencies
+        env:
+          PM: ${{ steps.pm.outputs.pm }}
+          INSTALL: ${{ inputs.install-command }}
+        run: |
+          if [ -n "$INSTALL" ]; then eval "$INSTALL"; exit 0; fi
+          case "$PM" in
+            bun) bun install --frozen-lockfile ;;
+            pnpm) pnpm install --frozen-lockfile ;;
+            npm) npm ci ;;
+          esac
+      - name: Playwright version
+        id: pw
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}-${{ inputs.e2e-browsers }}
+      - name: Install browsers
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        env:
+          BROWSERS: ${{ inputs.e2e-browsers }}
+        run: |
+          # shellcheck disable=SC2086
+          npx playwright install --with-deps $BROWSERS
+      - name: Install browser system deps
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        env:
+          BROWSERS: ${{ inputs.e2e-browsers }}
+        run: |
+          # shellcheck disable=SC2086
+          npx playwright install-deps $BROWSERS
+      - name: E2E prepare
+        if: inputs.e2e-prepare-command != ''
+        run: ${{ inputs.e2e-prepare-command }}
+      - name: E2E tests
+        env:
+          XVFB: ${{ inputs.e2e-xvfb }}
+          CMD: ${{ inputs.e2e-command }}
+        run: |
+          if [ "$XVFB" = true ]; then eval "xvfb-run --auto-servernum $CMD"; else eval "$CMD"; fi
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-traces
+          path: |
+            ${{ inputs.working-directory }}/test-results/
+            ${{ inputs.working-directory }}/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore

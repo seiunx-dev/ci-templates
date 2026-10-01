@@ -1,0 +1,89 @@
+# Reusable static-site build + GitHub Pages deploy (VitePress, Vite, ...). The build runs
+# on every event (so PRs catch broken docs); upload + deploy happen only on a push to the
+# default branch. pages: write / id-token: write are granted to the deploy job only.
+#
+# Caller job permissions: contents: read, pages: write, id-token: write.
+name: Pages
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        type: string
+        default: "."
+      bun-version:
+        description: Bun version (empty = package.json packageManager / .bun-version).
+        type: string
+        default: ""
+      install-command:
+        type: string
+        default: bun install --frozen-lockfile
+      build-command:
+        type: string
+        default: bun run docs:build
+      output-dir:
+        description: Build output directory, relative to working-directory.
+        type: string
+        default: docs/.vitepress/dist
+      deploy:
+        description: Deploy when the run is a push to the default branch.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    outputs:
+      deploy: ${{ steps.d.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ inputs.bun-version }}
+          bun-version-file: ${{ inputs.bun-version == '' && format('{0}/package.json', inputs.working-directory) || '' }}
+      - name: Install
+        run: ${{ inputs.install-command }}
+      - name: Build
+        run: ${{ inputs.build-command }}
+      - name: Decide deploy
+        id: d
+        env:
+          DEPLOY: ${{ inputs.deploy }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$DEPLOY" = true ] && [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload Pages artifact
+        if: steps.d.outputs.deploy == 'true'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ inputs.working-directory }}/${{ inputs.output-dir }}
+
+  deploy:
+    name: Deploy
+    needs: build
+    if: needs.build.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

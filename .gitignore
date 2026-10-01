@@ -1,0 +1,8 @@
+target/
+node_modules/
+.venv/
+dist/
+coverage/
+__pycache__/
+.ruff_cache/
+.pytest_cache/

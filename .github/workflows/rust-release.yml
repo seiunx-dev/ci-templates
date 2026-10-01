@@ -1,0 +1,334 @@
+# Reusable Rust release build: one job per target, packaged as tar.gz (zip for Windows)
+# and uploaded as artifact `release-<label>` (retention 1 day; gh-release.yml attaches it).
+# Builds run on tag pushes (and on workflow_dispatch dry runs), not on every main push.
+#
+# `targets` is a JSON list. Each entry:
+#   label    asset label, e.g. linux-x64                       (required)
+#   os       runner, e.g. ubuntu-latest / ubuntu-24.04-arm / macos-latest / windows-latest (required)
+#   target   Rust target triple (zigbuild may add a glibc suffix, e.g. x86_64-unknown-linux-gnu.2.28) (required)
+#   builder  cargo (default) | zigbuild | cross | ndk
+#   bins         override the `bins` input for this target (newline or space separated)
+#   features     extra cargo feature flags for this target
+#   files        extra files added for this target (newline separated, `src=>dest` allowed)
+#   extra-files  REPLACES the `extra-files` input for this target (e.g. an Android config)
+#   format       auto (zip for Windows, else tar.gz) | tar.gz | zip
+#   layout       overrides the `layout` input for this target
+#   apt          extra apt packages for this target
+#
+# Cache: release builds run on tag refs, which can read but never usefully write the Actions
+# cache (a tag-scoped entry is invisible to the next tag). `cache: false` (default) is an
+# honest cold build. `cache: true` restores `release-<label>`, which only a default-branch
+# run writes: run the workflow by hand on main (the dry run) to warm it.
+#
+# Caller example:
+#   binaries:
+#     needs: gate
+#     uses: seiunx-dev/ci-templates/.github/workflows/rust-release.yml@v1
+#     with:
+#       version: ${{ needs.gate.outputs.version }}
+#       tag: ${{ needs.gate.outputs.tag }}
+#       bins: haruki-hmes
+name: Rust release
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release version (from release-gate).
+        type: string
+        required: true
+      tag:
+        description: Release tag (from release-gate; empty on dry runs).
+        type: string
+        default: ""
+      name:
+        description: Asset base name. Empty = repository name lowercased.
+        type: string
+        default: ""
+      bins:
+        description: Binary names to package, one per line or space-separated. Empty = `name`.
+        type: string
+        default: ""
+      targets:
+        description: JSON list of targets (see header).
+        type: string
+        default: >-
+          [{"label":"linux-x64","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},
+           {"label":"macos-arm64","os":"macos-latest","target":"aarch64-apple-darwin"},
+           {"label":"windows-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc"}]
+      cargo-args:
+        description: Extra cargo build args (e.g. -p my-crate).
+        type: string
+        default: ""
+      features:
+        description: Feature flags for every target (e.g. --features media-ffi).
+        type: string
+        default: ""
+      profile:
+        type: string
+        default: release
+      toolchain:
+        description: Toolchain override (empty = rust-toolchain.toml, else stable).
+        type: string
+        default: ""
+      cache:
+        description: Restore the per-target rust-cache (see header). Default off.
+        type: boolean
+        default: false
+      extra-cache-path:
+        description: Extra path cached with actions/cache (e.g. a prebuilt compiler plugin). Restored always, saved only on the default branch.
+        type: string
+        default: ""
+      extra-cache-key:
+        description: Key for extra-cache-path; the runner OS and arch are appended.
+        type: string
+        default: ""
+      zig-version:
+        description: Zig used by the zigbuild builder (pinned; build.rs scripts may call zig directly).
+        type: string
+        default: 0.15.2
+      cargo-zigbuild-version:
+        type: string
+        default: 0.23.4
+      build-env:
+        description: KEY=VALUE lines exported to the build step; {version} and {tag} are substituted.
+        type: string
+        default: ""
+      build-secret-names:
+        description: Comma-separated env var names that receive secrets build-secret-1..3, in order (compile-time secrets).
+        type: string
+        default: ""
+      build-command:
+        description: >-
+          Replace cargo build entirely (custom toolchains). Env: TARGET, LABEL, VERSION, PROFILE, BIN_DIR.
+          The command must put the binaries into $BIN_DIR.
+        type: string
+        default: ""
+      setup-command:
+        description: Shell hook before the build (e.g. fetch a pinned C++ engine).
+        type: string
+        default: ""
+      apt-packages:
+        description: apt packages for Linux runners.
+        type: string
+        default: ""
+      submodules:
+        type: string
+        default: "false"
+      extra-files:
+        description: Files added to every archive, one per line (`src=>dest` renames).
+        type: string
+        default: ""
+      asset-name:
+        description: "Archive name template: {name} {version} {tag} {label} {target}."
+        type: string
+        default: "{name}-{version}-{label}"
+      layout:
+        description: "dir (files under a top-level folder) | flat (files at archive root)"
+        type: string
+        default: dir
+      upload-binaries:
+        description: Also upload raw binaries as artifact bin-<label> (e.g. for a thin Docker image built from them).
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 60
+    secrets:
+      build-secret-1:
+        required: false
+      build-secret-2:
+        required: false
+      build-secret-3:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.targets) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: ${{ inputs.submodules }}
+          persist-credentials: false
+      - name: Install apt packages
+        if: runner.os == 'Linux'
+        uses: seiunx-dev/ci-templates/actions/apt-install@v1
+        with:
+          packages: ${{ inputs.apt-packages }} ${{ matrix.apt }}
+      - name: Resolve target
+        id: t
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BUILDER: ${{ matrix.builder || 'cargo' }}
+        run: |
+          # zigbuild accepts a glibc suffix (x86_64-unknown-linux-gnu.2.28); rustup and target/ use the bare triple.
+          triple="$TARGET"
+          if [ "$BUILDER" = zigbuild ]; then triple="$(sed -E 's/\.[0-9]+\.[0-9]+$//' <<< "$TARGET")"; fi
+          echo "triple=$triple" >> "$GITHUB_OUTPUT"
+      - uses: seiunx-dev/ci-templates/actions/setup-rust@v1
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          targets: ${{ steps.t.outputs.triple }}
+          cache: ${{ inputs.cache && 'true' || 'false' }}
+          cache-key: release-${{ matrix.label }}
+      - name: Restore extra cache
+        id: extra-cache
+        if: inputs.extra-cache-path != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ inputs.extra-cache-path }}
+          key: ${{ inputs.extra-cache-key }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Install cargo-zigbuild
+        if: matrix.builder == 'zigbuild'
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-zigbuild@${{ inputs.cargo-zigbuild-version }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        if: matrix.builder == 'zigbuild'
+        with:
+          version: ${{ inputs.zig-version }}
+      - name: Install cross
+        if: matrix.builder == 'cross'
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cross
+      - name: Install cargo-ndk
+        if: matrix.builder == 'ndk'
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-ndk
+      - name: Setup hook
+        if: inputs.setup-command != ''
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          LABEL: ${{ matrix.label }}
+          VERSION: ${{ inputs.version }}
+        run: ${{ inputs.setup-command }}
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          TRIPLE: ${{ steps.t.outputs.triple }}
+          LABEL: ${{ matrix.label }}
+          BUILDER: ${{ matrix.builder || 'cargo' }}
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.tag }}
+          PROFILE: ${{ inputs.profile }}
+          NAME: ${{ inputs.name }}
+          BINS: ${{ matrix.bins || inputs.bins }}
+          CARGO_ARGS: ${{ inputs.cargo-args }}
+          FEATURES: ${{ inputs.features }} ${{ matrix.features }}
+          BUILD_ENV: ${{ inputs.build-env }}
+          BUILD_COMMAND: ${{ inputs.build-command }}
+          SECRET_NAMES: ${{ inputs.build-secret-names }}
+          SECRET_1: ${{ secrets.build-secret-1 }}
+          SECRET_2: ${{ secrets.build-secret-2 }}
+          SECRET_3: ${{ secrets.build-secret-3 }}
+        run: |
+          set -euo pipefail
+          name="${NAME:-${GITHUB_REPOSITORY#*/}}"; name="$(tr '[:upper:]' '[:lower:]' <<< "$name")"
+          bins="${BINS:-$name}"
+          while IFS= read -r kv; do
+            [ -n "$kv" ] || continue
+            kv="${kv//\{version\}/$VERSION}"; kv="${kv//\{tag\}/$TAG}"
+            export "${kv?}"
+          done <<< "$BUILD_ENV"
+          # Compile-time secrets are exported only inside this step.
+          IFS=, read -r -a secret_names <<< "$SECRET_NAMES"
+          for i in "${!secret_names[@]}"; do
+            var="SECRET_$((i + 1))"; n="$(echo "${secret_names[$i]}" | tr -d '[:space:]')"
+            [ -z "$n" ] || export "$n=${!var}"
+          done
+          unset SECRET_1 SECRET_2 SECRET_3
+          export BIN_DIR="$GITHUB_WORKSPACE/dist-bin"; mkdir -p "$BIN_DIR"
+          export TARGET LABEL VERSION PROFILE
+          exe=""; [[ "$TRIPLE" == *windows* ]] && exe=".exe"
+          if [ -n "$BUILD_COMMAND" ]; then
+            eval "$BUILD_COMMAND"
+          else
+            bin_flags=""
+            for b in $bins; do bin_flags="$bin_flags --bin $b"; done
+            case "$BUILDER" in
+              cargo)    cmd="cargo build --target $TARGET" ;;
+              zigbuild) cmd="cargo zigbuild --target $TARGET" ;;
+              cross)    cmd="cross build --target $TARGET" ;;
+              ndk)      export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}"; cmd="cargo ndk -t $TARGET build" ;;
+              *) echo "::error::unknown builder $BUILDER"; exit 1 ;;
+            esac
+            eval "$cmd --locked --profile $PROFILE $CARGO_ARGS $FEATURES $bin_flags"
+            outdir="target/$TRIPLE/$([ "$PROFILE" = dev ] && echo debug || echo "$PROFILE")"
+            for b in $bins; do cp "$outdir/$b$exe" "$BIN_DIR/"; done
+          fi
+          ls -l "$BIN_DIR"
+      - name: Save extra cache
+        if: >-
+          inputs.extra-cache-path != '' && steps.extra-cache.outputs.cache-hit != 'true' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ inputs.extra-cache-path }}
+          key: ${{ inputs.extra-cache-key }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Archive file list
+        id: files
+        shell: bash
+        env:
+          EXTRA: ${{ matrix.extra-files || inputs.extra-files }}
+          MATRIX_FILES: ${{ matrix.files }}
+          NAME: ${{ inputs.name }}
+          TEMPLATE: ${{ inputs.asset-name }}
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.tag }}
+          LABEL: ${{ matrix.label }}
+          TRIPLE: ${{ steps.t.outputs.triple }}
+        run: |
+          name="${NAME:-${GITHUB_REPOSITORY#*/}}"; name="$(tr '[:upper:]' '[:lower:]' <<< "$name")"
+          asset="$TEMPLATE"
+          asset="${asset//\{name\}/$name}"; asset="${asset//\{version\}/$VERSION}"
+          asset="${asset//\{tag\}/${TAG:-v$VERSION}}"; asset="${asset//\{label\}/$LABEL}"; asset="${asset//\{target\}/$TRIPLE}"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          {
+            echo "list<<__EOF__"
+            for f in dist-bin/*; do echo "$f"; done
+            [ -n "$EXTRA" ] && echo "$EXTRA"
+            [ -n "$MATRIX_FILES" ] && echo "$MATRIX_FILES"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+      - name: Package
+        uses: seiunx-dev/ci-templates/actions/package-archive@v1
+        with:
+          asset: ${{ steps.files.outputs.asset }}
+          files: ${{ steps.files.outputs.list }}
+          layout: ${{ matrix.layout || inputs.layout }}
+          format: ${{ matrix.format || 'auto' }}
+          windows: ${{ contains(matrix.target, 'windows') }}
+          out-dir: dist
+      - name: Upload archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.label }}
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload raw binaries
+        if: inputs.upload-binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bin-${{ matrix.label }}
+          path: dist-bin/
+          retention-days: 1
+          if-no-files-found: error

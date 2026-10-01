@@ -1,0 +1,29 @@
+name: Apt install
+description: Install Debian/Ubuntu packages with retries. Works on hosted runners (sudo) and in root containers (no sudo). No-op when `packages` is empty.
+inputs:
+  packages:
+    description: Space- or newline-separated package list.
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Install apt packages
+      if: inputs.packages != ''
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        set -euo pipefail
+        SUDO=""
+        if [ "$(id -u)" != 0 ]; then SUDO=sudo; fi
+        read -r -a pkgs <<< "$(echo "$PACKAGES" | tr '\n' ' ')"
+        [ "${#pkgs[@]}" -gt 0 ] || exit 0
+        for attempt in 1 2 3; do
+          if $SUDO apt-get update -qq && $SUDO apt-get install -y -qq --no-install-recommends "${pkgs[@]}"; then
+            exit 0
+          fi
+          echo "::warning::apt-get failed (attempt $attempt), retrying"
+          sleep $((attempt * 10))
+        done
+        exit 1

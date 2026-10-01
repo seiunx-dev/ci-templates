@@ -1,0 +1,48 @@
+name: Wait for checks
+description: >-
+  Block until the named check run on a commit has completed, and fail unless it succeeded.
+  Used by release workflows so a tag on a red (or still running) main commit never ships,
+  and so the main-built image already exists when the tag re-tags it.
+  Needs `checks: read` (and `contents: read`).
+inputs:
+  check-name:
+    description: Check run name to wait for (the aggregate job name in ci.yml).
+    default: CI OK
+  sha:
+    description: Commit to inspect.
+    default: ${{ github.sha }}
+  timeout-minutes:
+    description: Give up after this many minutes.
+    default: "30"
+  token:
+    description: Token with checks:read.
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - name: Wait for "${{ inputs.check-name }}" on ${{ inputs.sha }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        CHECK: ${{ inputs.check-name }}
+        SHA: ${{ inputs.sha }}
+        TIMEOUT: ${{ inputs.timeout-minutes }}
+      run: |
+        set -uo pipefail
+        deadline=$(( $(date +%s) + TIMEOUT * 60 ))
+        while :; do
+          state=$(gh api -X GET "repos/$GITHUB_REPOSITORY/commits/$SHA/check-runs" \
+                    -f check_name="$CHECK" -f filter=latest \
+                    --jq '.check_runs | sort_by(.started_at) | last | if . == null then "missing" else "\(.status) \(.conclusion)" end' 2>/dev/null || echo "api-error")
+          case "$state" in
+            "completed success") echo "\"$CHECK\" succeeded on $SHA"; exit 0 ;;
+            "completed cancelled") echo "::error::\"$CHECK\" on $SHA was cancelled. Re-run the CI run of this commit, then re-run this release."; exit 1 ;;
+            completed*) echo "::error::\"$CHECK\" on $SHA finished as '${state#completed }'. Fix main before tagging."; exit 1 ;;
+          esac
+          if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "::error::timed out after ${TIMEOUT}m waiting for \"$CHECK\" on $SHA (last state: $state). Was this commit pushed to the default branch?"
+            exit 1
+          fi
+          echo "\"$CHECK\": $state; waiting 30s"
+          sleep 30
+        done

@@ -1,0 +1,207 @@
+# Reusable Python CI on uv: `lint` (ruff check + ruff format --check + optional extra
+# lint such as mypy) and `test` (uv sync --locked, then your test command) with an
+# optional python-version matrix, services, and coverage upload. Optionally builds the
+# sdist/wheel (`uv build`) and uploads it as an artifact for a caller-side PyPI publish
+# job (PyPI trusted publishing does not work from inside a reusable workflow).
+name: Python CI
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        type: string
+        default: "."
+      python-versions:
+        description: JSON list of Python versions for the test job, e.g. '["3.12"]' or '["3.14t"]'. '[""]' = .python-version / requires-python.
+        type: string
+        default: '[""]'
+      uv-version:
+        description: uv version (empty = setup-uv default / required-version in pyproject).
+        type: string
+        default: ""
+      sync-args:
+        description: Arguments for uv sync.
+        type: string
+        default: --locked --all-extras --dev
+      ruff:
+        description: Run ruff check and ruff format --check (uses the project's ruff if it is a dependency, else uvx ruff).
+        type: boolean
+        default: true
+      lint-command:
+        description: Extra lint command (e.g. "uv run mypy src").
+        type: string
+        default: ""
+      test-command:
+        description: Test command; empty = no test job. e.g. "uv run pytest -n auto".
+        type: string
+        default: uv run pytest
+      coverage-path:
+        description: Coverage file the test command writes (e.g. coverage/python.xml); uploaded as coverage-python.
+        type: string
+        default: ""
+      download-artifact:
+        description: Workflow artifact (same run) downloaded into ./ci-artifacts before sync, e.g. a native wheel.
+        type: string
+        default: ""
+      setup-command:
+        description: Shell hook after uv sync (e.g. install a downloaded wheel, repair a native lib).
+        type: string
+        default: ""
+      apt-packages:
+        type: string
+        default: ""
+      postgres-image:
+        type: string
+        default: ""
+      redis-image:
+        type: string
+        default: ""
+      env:
+        description: KEY=VALUE lines. ${CI_POSTGRES_URL} / ${CI_REDIS_URL} are substituted.
+        type: string
+        default: ""
+      build-dist:
+        description: Run `uv build` and upload dist/ as artifact `dist` (retention 3 days).
+        type: boolean
+        default: false
+      runs-on:
+        type: string
+        default: ubuntu-latest
+      timeout-minutes:
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ inputs.uv-version }}
+          working-directory: ${{ inputs.working-directory }}
+          enable-cache: true
+          save-cache: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - name: ruff
+        if: inputs.ruff
+        run: |
+          if [ -f uv.lock ] && grep -q '^name = "ruff"$' uv.lock; then
+            ruff="uv run --frozen ruff"   # the project's pinned ruff
+          else
+            ruff="uvx ruff"
+          fi
+          $ruff check --output-format=github .
+          $ruff format --check .
+      - name: Extra lint
+        if: inputs.lint-command != ''
+        env:
+          SYNC_ARGS: ${{ inputs.sync-args }}
+        run: |
+          # shellcheck disable=SC2086
+          uv sync $SYNC_ARGS
+          ${{ inputs.lint-command }}
+      - name: Build sdist and wheel
+        if: inputs.build-dist
+        run: uv build
+      - name: Upload dist
+        if: inputs.build-dist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: ${{ inputs.working-directory }}/dist/
+          retention-days: 3
+          if-no-files-found: error
+
+  test:
+    name: Test ${{ matrix.python }}
+    if: inputs.test-command != ''
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(inputs.python-versions) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    services:
+      postgres:
+        image: ${{ inputs.postgres-image }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: ${{ inputs.redis-image }}
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: seiunx-dev/ci-templates/actions/apt-install@v1
+        with:
+          packages: ${{ inputs.apt-packages }}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ inputs.uv-version }}
+          python-version: ${{ matrix.python }}
+          working-directory: ${{ inputs.working-directory }}
+          enable-cache: true
+          save-cache: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - name: Download artifact
+        if: inputs.download-artifact != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.download-artifact }}
+          path: ${{ inputs.working-directory }}/ci-artifacts
+      - name: Export env and service URLs
+        env:
+          LINES: ${{ inputs.env }}
+        run: |
+          pg="postgresql://postgres:postgres@localhost:5432/test"
+          rd="redis://localhost:6379/0"
+          { echo "CI_POSTGRES_URL=$pg"; echo "CI_REDIS_URL=$rd"; } >> "$GITHUB_ENV"
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            line="${line//\$\{CI_POSTGRES_URL\}/$pg}"
+            line="${line//\$\{CI_REDIS_URL\}/$rd}"
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "$LINES"
+      - name: uv sync
+        env:
+          SYNC_ARGS: ${{ inputs.sync-args }}
+        run: |
+          # shellcheck disable=SC2086
+          uv sync $SYNC_ARGS
+      - name: Setup hook
+        if: inputs.setup-command != ''
+        run: ${{ inputs.setup-command }}
+      - name: Tests
+        run: ${{ inputs.test-command }}
+      - name: Upload coverage
+        if: inputs.coverage-path != '' && strategy.job-index == 0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-python
+          path: ${{ inputs.working-directory }}/${{ inputs.coverage-path }}
+          retention-days: 3
+          if-no-files-found: error

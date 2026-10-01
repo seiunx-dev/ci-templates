@@ -1,0 +1,329 @@
+# Reusable Docker build/publish to GHCR.
+#
+# Events:
+#   pull_request   build only (no login, no push); reads the cache, never writes it.
+#                  With `pr-paths`, the build is skipped when no listed path changed.
+#   branch push    build + push :<branch>, :sha-<full sha> and :sha-<7 chars> (the short
+#                  form most deployments already pin); writes the build cache only from
+#                  the default branch.
+#   tag push       with `promote-on-tag: true`, re-tag the existing :sha-<sha> image
+#                  (built from main) as :X.Y.Z / :X.Y / :latest with
+#                  `docker buildx imagetools create`: no rebuild. Falls back to a build
+#                  when that image does not exist. Only safe when the image does not bake
+#                  the tag into the binary (version comes from Cargo.toml/pyproject/...).
+#
+# Cache: `gha` (default, scope = image name so several images in one repo do not
+# overwrite each other) or `registry` (<image>:buildcache, recommended for heavy Rust
+# images since it does not count against the 10 GB Actions cache quota).
+#
+# Caller job permissions: contents: read, packages: write, pull-requests: read
+# (packages: write is never used on pull_request runs: there is no login; fork and
+# Dependabot PR tokens are read-only anyway).
+name: Docker
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Full image name. Empty = ghcr.io/<owner>/<repo> lowercased.
+        type: string
+        default: ""
+      context:
+        type: string
+        default: "."
+      file:
+        description: Dockerfile path. Empty = <context>/Dockerfile.
+        type: string
+        default: ""
+      target:
+        type: string
+        default: ""
+      platforms:
+        description: e.g. linux/amd64 or linux/amd64,linux/arm64 (QEMU is set up for non-amd64).
+        type: string
+        default: linux/amd64
+      build-args:
+        description: Extra build args, one KEY=VALUE per line.
+        type: string
+        default: ""
+      version-build-arg:
+        description: >-
+          Name of a build arg that receives the version (tag without prefix, or <branch>-<sha7>).
+          Empty = none. Avoid declaring it early in the Dockerfile: it busts every later layer.
+        type: string
+        default: ""
+      tag-prefix:
+        description: Git tag prefix for release tags (v, engine-v, ...).
+        type: string
+        default: v
+      latest:
+        description: "auto (stable tag that is the highest semver tag with this prefix) | true | false"
+        type: string
+        default: auto
+      extra-tags:
+        description: Extra docker/metadata-action tag rules, one per line.
+        type: string
+        default: ""
+      promote-on-tag:
+        description: On tag pushes, re-tag the :sha-<sha> image instead of rebuilding.
+        type: boolean
+        default: false
+      promote-wait-minutes:
+        description: How long to wait for the :sha-<sha> image to appear before building instead.
+        type: number
+        default: 0
+      pr-paths:
+        description: Glob patterns (one per line, ** allowed). When set, PR builds run only if a matching file changed.
+        type: string
+        default: ""
+      cache-backend:
+        description: "gha | registry | none"
+        type: string
+        default: gha
+      cache-mode:
+        description: "min | max (max also caches intermediate stages, e.g. cargo-chef cook)"
+        type: string
+        default: min
+      provenance:
+        description: build-push-action provenance (false keeps GHCR free of unknown/unknown manifests).
+        type: string
+        default: "false"
+      sbom:
+        type: string
+        default: "false"
+      artifact-name:
+        description: Same-run workflow artifact to download before the build (e.g. prebuilt binaries). Supports a glob pattern.
+        type: string
+        default: ""
+      artifact-path:
+        description: Where to put the downloaded artifact (relative to the repo root).
+        type: string
+        default: dist
+      artifact-merge:
+        description: Merge multiple matching artifacts into artifact-path (false = one sub-directory per artifact).
+        type: boolean
+        default: true
+      prepare-command:
+        description: Shell run after checkout and the artifact download, before the build (e.g. lay out a binary context).
+        type: string
+        default: ""
+      submodules:
+        type: string
+        default: "false"
+      runs-on:
+        type: string
+        default: ubuntu-latest
+      timeout-minutes:
+        type: number
+        default: 45
+    outputs:
+      image:
+        description: Image name.
+        value: ${{ jobs.docker.outputs.image }}
+      digest:
+        description: Pushed digest (empty on PRs).
+        value: ${{ jobs.docker.outputs.digest }}
+      version:
+        description: Version used for tags/labels.
+        value: ${{ jobs.docker.outputs.version }}
+
+env:
+  DOCKER_BUILD_RECORD_RETENTION_DAYS: 3
+
+jobs:
+  docker:
+    name: Build and push
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      image: ${{ steps.meta0.outputs.image }}
+      digest: ${{ steps.promote.outputs.digest || steps.build.outputs.digest }}
+      version: ${{ steps.meta0.outputs.version }}
+    steps:
+      - name: Changed paths
+        id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATTERNS: ${{ inputs.pr-paths }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ] || [ -z "$PATTERNS" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename')
+          build=false
+          while IFS= read -r f; do
+            while IFS= read -r p; do
+              [ -n "$p" ] || continue
+              # shellcheck disable=SC2053
+              if [[ "$f" == $p ]]; then build=true; break 2; fi
+            done <<< "$PATTERNS"
+          done <<< "$files"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          [ "$build" = true ] || echo "::notice::no Docker-relevant change; skipping the PR image build"
+
+      - name: Resolve image, version and tags
+        id: meta0
+        env:
+          IMAGE: ${{ inputs.image }}
+          PREFIX: ${{ inputs.tag-prefix }}
+          LATEST: ${{ inputs.latest }}
+        run: |
+          image="${IMAGE:-ghcr.io/${GITHUB_REPOSITORY}}"; image="$(tr '[:upper:]' '[:lower:]' <<< "$image")"
+          is_tag=false; version=""; latest=false
+          if [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" == "$PREFIX"* ]]; then
+            is_tag=true; version="${GITHUB_REF_NAME#"$PREFIX"}"
+          else
+            ref="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"; version="${ref//\//-}-${GITHUB_SHA::7}"
+          fi
+          if [ "$is_tag" = true ]; then
+            case "$LATEST" in
+              true) latest=true ;;
+              false) latest=false ;;
+              auto)
+                if [[ "$version" != *-* ]]; then
+                  highest=$(git ls-remote --tags --refs "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "refs/tags/${PREFIX}*" 2>/dev/null \
+                    | sed "s#.*refs/tags/${PREFIX}##" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 || true)
+                  # Private repos need a token for ls-remote; without the list, a stable tag counts as latest.
+                  if [ -z "$highest" ] || [ "$highest" = "$version" ]; then latest=true; fi
+                fi ;;
+            esac
+          fi
+          scope="${image##*/}"
+          {
+            echo "image=$image"; echo "version=$version"; echo "is-tag=$is_tag"
+            echo "latest=$latest"; echo "scope=$scope"
+          } >> "$GITHUB_OUTPUT"
+          echo "image=$image version=$version tag=$is_tag latest=$latest"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.paths.outputs.build == 'true'
+        with:
+          submodules: ${{ inputs.submodules }}
+          persist-credentials: false
+
+      - name: Download artifact
+        if: steps.paths.outputs.build == 'true' && inputs.artifact-name != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          merge-multiple: ${{ inputs.artifact-merge }}
+
+      - name: Prepare build context
+        if: steps.paths.outputs.build == 'true' && inputs.prepare-command != ''
+        shell: bash
+        run: ${{ inputs.prepare-command }}
+
+      - name: Set up QEMU
+        if: steps.paths.outputs.build == 'true' && inputs.platforms != 'linux/amd64'
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.paths.outputs.build == 'true'
+
+      - name: Log in to GHCR
+        if: steps.paths.outputs.build == 'true' && github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Docker metadata
+        id: meta
+        if: steps.paths.outputs.build == 'true'
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.meta0.outputs.image }}
+          flavor: |
+            latest=${{ steps.meta0.outputs.latest }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=long,prefix=sha-
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}},value=${{ steps.meta0.outputs.version }},enable=${{ steps.meta0.outputs.is-tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.meta0.outputs.version }},enable=${{ steps.meta0.outputs.is-tag }}
+            ${{ inputs.extra-tags }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta0.outputs.version }}
+
+      - name: Promote main image
+        id: promote
+        if: steps.paths.outputs.build == 'true' && inputs.promote-on-tag && steps.meta0.outputs.is-tag == 'true'
+        env:
+          IMAGE: ${{ steps.meta0.outputs.image }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          WAIT: ${{ inputs.promote-wait-minutes }}
+        run: |
+          set -uo pipefail
+          src="$IMAGE:sha-$GITHUB_SHA"
+          deadline=$(( $(date +%s) + WAIT * 60 ))
+          until docker buildx imagetools inspect "$src" >/dev/null 2>&1; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::warning::$src not found; building from source instead"
+              echo "promoted=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            sleep 30
+          done
+          args=()
+          while IFS= read -r t; do
+            if [ -n "$t" ] && [ "$t" != "$src" ]; then args+=(--tag "$t"); fi
+          done <<< "$TAGS"
+          docker buildx imagetools create "${args[@]}" "$src"
+          digest=$(docker buildx imagetools inspect "$src" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "promoted=true" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Promoted $src ($digest) without rebuilding"
+
+      - name: Cache settings
+        id: cache
+        if: steps.paths.outputs.build == 'true' && steps.promote.outputs.promoted != 'true'
+        env:
+          BACKEND: ${{ inputs.cache-backend }}
+          MODE: ${{ inputs.cache-mode }}
+          IMAGE: ${{ steps.meta0.outputs.image }}
+          SCOPE: ${{ steps.meta0.outputs.scope }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          from=""; to=""
+          write=false; [ "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" ] && write=true
+          case "$BACKEND" in
+            gha) from="type=gha,scope=$SCOPE"; [ "$write" = true ] && to="type=gha,scope=$SCOPE,mode=$MODE" ;;
+            registry) from="type=registry,ref=$IMAGE:buildcache"; [ "$write" = true ] && to="type=registry,ref=$IMAGE:buildcache,mode=$MODE" ;;
+          esac
+          echo "from=$from" >> "$GITHUB_OUTPUT"; echo "to=$to" >> "$GITHUB_OUTPUT"
+
+      - name: Build args
+        id: args
+        if: steps.paths.outputs.build == 'true' && steps.promote.outputs.promoted != 'true'
+        env:
+          EXTRA: ${{ inputs.build-args }}
+          NAME: ${{ inputs.version-build-arg }}
+          VERSION: ${{ steps.meta0.outputs.version }}
+        run: |
+          {
+            echo "list<<__EOF__"
+            [ -n "$NAME" ] && echo "$NAME=$VERSION"
+            [ -n "$EXTRA" ] && echo "$EXTRA"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build${{ github.event_name != 'pull_request' && ' and push' || '' }}
+        id: build
+        if: steps.paths.outputs.build == 'true' && steps.promote.outputs.promoted != 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.file }}
+          target: ${{ inputs.target }}
+          platforms: ${{ inputs.platforms }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ steps.args.outputs.list }}
+          cache-from: ${{ steps.cache.outputs.from }}
+          cache-to: ${{ steps.cache.outputs.to }}
+          provenance: ${{ inputs.provenance }}
+          sbom: ${{ inputs.sbom }}

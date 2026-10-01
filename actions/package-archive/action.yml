@@ -1,0 +1,70 @@
+name: Package archive
+description: >-
+  Stage files and create <asset>.tar.gz (or .zip on Windows / when requested) in `out-dir`.
+  Works on Linux, macOS and Windows (Git Bash). Prints the archive path as an output.
+inputs:
+  asset:
+    description: Archive base name without extension (e.g. haruki-hmes-v1.2.0-x86_64-unknown-linux-musl).
+    required: true
+  files:
+    description: Files or directories to include, one per line. `src=>dest` renames inside the archive.
+    required: true
+  format:
+    description: "auto (zip on Windows targets, else tar.gz) | tar.gz | zip"
+    default: auto
+  layout:
+    description: "dir = files under a top-level <asset>/ directory; flat = files at archive root."
+    default: dir
+  windows:
+    description: "'true' when packaging a Windows target (selects zip in auto mode)."
+    default: "false"
+  out-dir:
+    description: Output directory.
+    default: dist
+outputs:
+  path:
+    description: Path of the created archive.
+    value: ${{ steps.pack.outputs.path }}
+runs:
+  using: composite
+  steps:
+    - name: Package ${{ inputs.asset }}
+      id: pack
+      shell: bash
+      env:
+        ASSET: ${{ inputs.asset }}
+        FILES: ${{ inputs.files }}
+        FORMAT: ${{ inputs.format }}
+        LAYOUT: ${{ inputs.layout }}
+        IS_WINDOWS: ${{ inputs.windows }}
+        OUT: ${{ inputs.out-dir }}
+      run: |
+        set -euo pipefail
+        fmt="$FORMAT"
+        if [ "$fmt" = auto ]; then [ "$IS_WINDOWS" = true ] && fmt=zip || fmt=tar.gz; fi
+        stage_root="$RUNNER_TEMP/pkg-$ASSET"; rm -rf "$stage_root"; mkdir -p "$stage_root" "$OUT"
+        if [ "$LAYOUT" = dir ]; then stage="$stage_root/$ASSET"; else stage="$stage_root"; fi
+        mkdir -p "$stage"
+        while IFS= read -r line; do
+          line="${line%%#*}"; line="$(echo "$line" | sed 's/[[:space:]]*$//; s/^[[:space:]]*//')"
+          [ -n "$line" ] || continue
+          src="${line%%=>*}"; dest="$(basename "$src")"
+          if [[ "$line" == *"=>"* ]]; then dest="${line#*=>}"; fi
+          src="$(echo "$src" | sed 's/[[:space:]]*$//')"; dest="$(echo "$dest" | sed 's/^[[:space:]]*//')"
+          [ -e "$src" ] || { echo "::error::missing file for archive: $src"; exit 1; }
+          mkdir -p "$stage/$(dirname "$dest")"
+          cp -R "$src" "$stage/$dest"
+        done <<< "$FILES"
+        out_abs="$(cd "$OUT" && pwd)"
+        cd "$stage_root"
+        items=(); while IFS= read -r x; do items+=("$x"); done < <(ls -A)
+        if [ "$fmt" = zip ]; then
+          archive="$out_abs/$ASSET.zip"
+          if command -v 7z >/dev/null 2>&1; then 7z a -tzip -bd "$archive" "${items[@]}" >/dev/null; else zip -qr "$archive" "${items[@]}"; fi
+        else
+          archive="$out_abs/$ASSET.tar.gz"
+          tar -czf "$archive" "${items[@]}"
+        fi
+        cd "$GITHUB_WORKSPACE"
+        echo "path=$OUT/$(basename "$archive")" >> "$GITHUB_OUTPUT"
+        ls -l "$archive"

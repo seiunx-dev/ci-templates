@@ -1,0 +1,151 @@
+# Reusable Go release build: cross-compiles every platform in one job (CGO off, -trimpath),
+# packages <asset>.tar.gz (zip for windows), and uploads artifact `release-go`
+# (retention 1 day) for gh-release.yml.
+#
+# `binaries` maps output names to main packages, one per line: `name=./cmd/name` or `name=.`.
+# `ldflags` may use {version} {tag} {commit} {date} {module}.
+# `build-command` replaces the built-in build entirely (e.g. a reproducible docker-based
+# script); it must leave the finished archives in ./dist.
+name: Go release
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      tag:
+        type: string
+        default: ""
+      binaries:
+        description: name=package lines. Empty = <repo name>=. .
+        type: string
+        default: ""
+      platforms:
+        description: GOOS/GOARCH list, space-separated.
+        type: string
+        default: linux/amd64 linux/arm64
+      ldflags:
+        type: string
+        default: -s -w -X {module}/version.Version={tag}
+      cgo:
+        type: string
+        default: "0"
+      go-version-file:
+        type: string
+        default: go.mod
+      extra-files:
+        description: Files added to every archive, one per line (`src=>dest` renames).
+        type: string
+        default: ""
+      asset-name:
+        description: "Archive name template: {name} {version} {tag} {os} {arch} {label} (label = os-arch)."
+        type: string
+        default: "{name}-{label}"
+      layout:
+        description: "flat (files at archive root) | dir"
+        type: string
+        default: flat
+      build-command:
+        description: "Replace the built-in build (must write archives to ./dist). Env: VERSION, TAG."
+        type: string
+        default: ""
+      upload-binaries:
+        description: Also upload raw binaries as artifact bin-go (dist-bin/<os>-<arch>/...).
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: inputs.build-command == ''
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: false
+      - name: Custom build
+        if: inputs.build-command != ''
+        env:
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.tag }}
+        run: ${{ inputs.build-command }}
+      - name: Build and package
+        if: inputs.build-command == ''
+        env:
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.tag }}
+          BINARIES: ${{ inputs.binaries }}
+          PLATFORMS: ${{ inputs.platforms }}
+          LDFLAGS: ${{ inputs.ldflags }}
+          CGO_ENABLED: ${{ inputs.cgo }}
+          EXTRA: ${{ inputs.extra-files }}
+          TEMPLATE: ${{ inputs.asset-name }}
+          LAYOUT: ${{ inputs.layout }}
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          module="$(go list -m)"; repo="${GITHUB_REPOSITORY#*/}"
+          tag="${TAG:-v$VERSION}"
+          date="$(git log -1 --format=%cI)"   # commit date keeps builds reproducible
+          flags="$LDFLAGS"
+          flags="${flags//\{version\}/$VERSION}"; flags="${flags//\{tag\}/$tag}"
+          flags="${flags//\{commit\}/$GITHUB_SHA}"; flags="${flags//\{date\}/$date}"; flags="${flags//\{module\}/$module}"
+          [ -n "$BINARIES" ] || BINARIES="$repo=."
+          mkdir -p dist
+          for platform in $PLATFORMS; do
+            export GOOS="${platform%/*}" GOARCH="${platform#*/}"
+            label="$GOOS-$GOARCH"; exe=""; [ "$GOOS" = windows ] && exe=".exe"
+            bindir="dist-bin/$label"; mkdir -p "$bindir"
+            first=""
+            while IFS= read -r line; do
+              [ -n "$line" ] || continue
+              bin="${line%%=*}"; pkg="${line#*=}"; first="${first:-$bin}"
+              go build -trimpath -ldflags "$flags" -o "$bindir/$bin$exe" "$pkg"
+            done <<< "$BINARIES"
+            asset="$TEMPLATE"
+            asset="${asset//\{name\}/$first}"; asset="${asset//\{version\}/$VERSION}"; asset="${asset//\{tag\}/$tag}"
+            asset="${asset//\{os\}/$GOOS}"; asset="${asset//\{arch\}/$GOARCH}"; asset="${asset//\{label\}/$label}"
+            stage="$RUNNER_TEMP/stage/$asset"; rm -rf "$RUNNER_TEMP/stage"; mkdir -p "$stage"
+            cp "$bindir"/* "$stage/"
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              src="${f%%=>*}"; dest="$(basename "$src")"; [[ "$f" == *"=>"* ]] && dest="${f#*=>}"
+              mkdir -p "$stage/$(dirname "$dest")"; cp -R "$src" "$stage/$dest"
+            done <<< "$EXTRA"
+            if [ "$LAYOUT" = dir ]; then root="$RUNNER_TEMP/stage"; else root="$stage"; fi
+            if [ "$GOOS" = windows ]; then
+              # shellcheck disable=SC2046
+              (cd "$root" && zip -qr "$GITHUB_WORKSPACE/dist/$asset.zip" $(ls -A))
+            else
+              # shellcheck disable=SC2046
+              (cd "$root" && tar -czf "$GITHUB_WORKSPACE/dist/$asset.tar.gz" $(ls -A))
+            fi
+          done
+          ls -l dist
+      - name: Upload archives
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-go
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload raw binaries
+        if: inputs.upload-binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bin-go
+          path: dist-bin/
+          retention-days: 1
+          if-no-files-found: error

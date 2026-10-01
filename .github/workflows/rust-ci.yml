@@ -1,0 +1,438 @@
+# Reusable Rust CI: `lint` (fmt + clippy -D warnings) and `test` (cargo test, or
+# cargo-llvm-cov when coverage is on) as two parallel jobs.
+#
+# - No separate `cargo check`: clippy --all-targets already type-checks everything.
+# - Tests run once. With `coverage: true` the same run produces coverage/lcov-rust.info
+#   (artifact `coverage-<cache-key-prefix>`), which sonar.yml consumes; do not run tests again
+#   in a Sonar workflow.
+# - rust-cache keys are per job purpose and saved only from the default branch.
+# - Optional Postgres/Redis services (Linux runners only). Without services and container the
+#   job has no `services:`/`container:` keys at all, so the same template runs on Windows/macOS.
+#   Tests get CI_POSTGRES_URL / CI_REDIS_URL; map them onto your own variable names via `env`.
+#
+# Caller example:
+#   jobs:
+#     rust:
+#       uses: seiunx-dev/ci-templates/.github/workflows/rust-ci.yml@v1
+#       with:
+#         coverage: true
+#         postgres-image: postgres:17-alpine
+#         env: |
+#           HARUKI_TEST_REGISTRY_DSN=${CI_POSTGRES_URL}
+name: Rust CI
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Main Cargo project directory.
+        type: string
+        default: "."
+      extra-directories:
+        description: Other standalone Cargo projects (not workspace members) that get fmt/clippy/test too, one per line.
+        type: string
+        default: ""
+      toolchain:
+        description: Toolchain override. Empty = rust-toolchain.toml channel, else stable. Prefer committing rust-toolchain.toml.
+        type: string
+        default: ""
+      targets:
+        description: Extra rustup targets (comma-separated), e.g. wasm32-unknown-unknown for extra-lint-command.
+        type: string
+        default: ""
+      cargo-args:
+        description: Package selection passed to clippy and test (e.g. --workspace, -p foo).
+        type: string
+        default: --workspace
+      feature-sets:
+        description: >-
+          Feature flag sets to lint, one per line. `default` = no extra flags.
+          e.g. "default\n--no-default-features --features nuverse-auth\n--all-features".
+        type: string
+        default: default
+      test-feature-sets:
+        description: Feature flag sets to test, one per line (same syntax as feature-sets).
+        type: string
+        default: default
+      test-args:
+        description: Extra cargo test arguments before `--` (e.g. --lib --bins).
+        type: string
+        default: ""
+      test-harness-args:
+        description: Arguments after `--` for the test harness (e.g. --test-threads=1).
+        type: string
+        default: ""
+      extra-test-command:
+        description: >-
+          Shell run after the main tests with the services up. $CARGO_TEST is `cargo test` or
+          `cargo llvm-cov --no-report` (coverage mode), e.g.
+          `$CARGO_TEST --locked --lib -- --ignored --test-threads=1 db::tests postgres`.
+          Always pass a test-name filter: a bare `--ignored` also runs network, credential and
+          memory-probe tests that are ignored for a reason.
+        type: string
+        default: ""
+      extra-lint-command:
+        description: Shell run at the end of the lint job (e.g. a wasm32 check, cargo doc, cargo audit).
+        type: string
+        default: ""
+      fmt:
+        description: Run cargo fmt --check.
+        type: boolean
+        default: true
+      coverage:
+        description: Run tests under cargo-llvm-cov and upload coverage/lcov-rust.info.
+        type: boolean
+        default: false
+      coverage-fail-under-lines:
+        description: Minimum line coverage percentage (empty = no gate).
+        type: string
+        default: ""
+      cargo-llvm-cov-version:
+        description: cargo-llvm-cov version installed by taiki-e/install-action.
+        type: string
+        default: 0.9.0
+      msrv:
+        description: If set (e.g. 1.85), an extra job runs `cargo check --locked` on that toolchain.
+        type: string
+        default: ""
+      postgres-image:
+        description: Postgres service image (e.g. postgres:17-alpine). Empty = no service.
+        type: string
+        default: ""
+      redis-image:
+        description: Redis service image (e.g. redis:7-alpine). Empty = no service.
+        type: string
+        default: ""
+      container:
+        description: Run both jobs in this container image (e.g. debian:trixie-slim for system libs). Empty = on the runner.
+        type: string
+        default: ""
+      apt-packages:
+        description: Debian/Ubuntu packages to install first (e.g. "clang pkg-config libavcodec-dev").
+        type: string
+        default: ""
+      submodules:
+        description: actions/checkout submodules (false | true | recursive).
+        type: string
+        default: "false"
+      setup-command:
+        description: Shell hook run after checkout and toolchain setup (e.g. fetch a pinned C++ engine).
+        type: string
+        default: ""
+      env:
+        description: >-
+          KEY=VALUE lines exported to both jobs. ${CI_POSTGRES_URL} and ${CI_REDIS_URL}
+          are substituted with the service URLs.
+        type: string
+        default: ""
+      cache-key-prefix:
+        description: Prefix for rust-cache keys and the coverage artifact name. Change it when one repo calls rust-ci more than once.
+        type: string
+        default: rust
+      runs-on:
+        description: Runner label.
+        type: string
+        default: ubuntu-latest
+      lint-timeout-minutes:
+        type: number
+        default: 20
+      test-timeout-minutes:
+        type: number
+        default: 30
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: short
+
+jobs:
+  lint:
+    name: Lint
+    if: inputs.container == ''
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.lint-timeout-minutes }}
+    steps: &lint-steps
+      - name: Install base packages (container)
+        if: inputs.container != ''
+        uses: seiunx-dev/ci-templates/actions/apt-install@v1
+        with:
+          packages: ca-certificates curl git build-essential jq python3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: ${{ inputs.submodules }}
+          persist-credentials: false
+      - uses: seiunx-dev/ci-templates/actions/apt-install@v1
+        with:
+          packages: ${{ inputs.apt-packages }}
+      - name: Export env
+        if: inputs.env != ''
+        shell: bash
+        env:
+          LINES: ${{ inputs.env }}
+        run: |
+          while IFS= read -r line; do
+            [ -z "$line" ] || echo "$line" >> "$GITHUB_ENV"
+          done <<< "$LINES"
+      - name: Compute cache workspaces
+        id: ws
+        shell: bash
+        env:
+          MAIN: ${{ inputs.working-directory }}
+          EXTRA: ${{ inputs.extra-directories }}
+        run: |
+          {
+            echo "list<<__EOF__"
+            echo "$MAIN -> target"
+            while IFS= read -r d; do [ -z "$d" ] || echo "$d -> target"; done <<< "$EXTRA"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+      - uses: seiunx-dev/ci-templates/actions/setup-rust@v1
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          components: rustfmt,clippy
+          targets: ${{ inputs.targets }}
+          working-directory: ${{ inputs.working-directory }}
+          cache-key: ${{ inputs.cache-key-prefix }}-lint
+          cache-workspaces: ${{ steps.ws.outputs.list }}
+      - name: Setup hook
+        if: inputs.setup-command != ''
+        shell: bash
+        run: ${{ inputs.setup-command }}
+      - name: cargo fmt --check
+        if: inputs.fmt
+        shell: bash
+        env:
+          MAIN: ${{ inputs.working-directory }}
+          EXTRA: ${{ inputs.extra-directories }}
+        run: |
+          set -euo pipefail
+          for dir in "$MAIN" $EXTRA; do
+            echo "::group::fmt $dir"; (cd "$dir" && cargo fmt --all -- --check); echo "::endgroup::"
+          done
+      - name: cargo clippy -D warnings
+        shell: bash
+        env:
+          MAIN: ${{ inputs.working-directory }}
+          EXTRA: ${{ inputs.extra-directories }}
+          CARGO_ARGS: ${{ inputs.cargo-args }}
+          FEATURE_SETS: ${{ inputs.feature-sets }}
+        run: |
+          set -euo pipefail
+          sets=()  # bash 3.2 compatible (macOS)
+          while IFS= read -r l; do [ -z "${l//[[:space:]]/}" ] || sets+=("$l"); done <<< "$FEATURE_SETS"
+          [ "${#sets[@]}" -gt 0 ] || sets=(default)
+          for set in "${sets[@]}"; do
+            flags="$set"; [ "$flags" = default ] && flags=""
+            echo "::group::clippy $MAIN $flags"
+            (cd "$MAIN" && eval "cargo clippy --locked $CARGO_ARGS --all-targets $flags -- -D warnings")
+            echo "::endgroup::"
+          done
+          for dir in $EXTRA; do
+            echo "::group::clippy $dir"; (cd "$dir" && cargo clippy --locked --all-targets -- -D warnings); echo "::endgroup::"
+          done
+      - name: Extra lint
+        if: inputs.extra-lint-command != ''
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.extra-lint-command }}
+
+  lint-container:
+    name: Lint
+    if: inputs.container != ''
+    runs-on: ${{ inputs.runs-on }}
+    container: ${{ inputs.container }}
+    timeout-minutes: ${{ inputs.lint-timeout-minutes }}
+    steps: *lint-steps
+
+  # Two variants of the same test job (and of lint above). Service containers and `container:` only work on
+  # Linux runners, so the plain variant (no services, no container) is the one that runs on
+  # Windows/macOS; the steps are shared through a YAML anchor.
+  test:
+    name: Test
+    if: inputs.postgres-image == '' && inputs.redis-image == '' && inputs.container == ''
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.test-timeout-minutes }}
+    steps: &test-steps
+      - name: Install base packages (container)
+        if: inputs.container != ''
+        uses: seiunx-dev/ci-templates/actions/apt-install@v1
+        with:
+          packages: ca-certificates curl git build-essential jq python3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: ${{ inputs.submodules }}
+          persist-credentials: false
+      - uses: seiunx-dev/ci-templates/actions/apt-install@v1
+        with:
+          packages: ${{ inputs.apt-packages }}
+      - name: Export env and service URLs
+        shell: bash
+        env:
+          LINES: ${{ inputs.env }}
+          IN_CONTAINER: ${{ inputs.container != '' }}
+        run: |
+          pg_host=localhost; redis_host=localhost
+          if [ "$IN_CONTAINER" = true ]; then pg_host=postgres; redis_host=redis; fi
+          pg="postgres://postgres:postgres@${pg_host}:5432/test"
+          rd="redis://${redis_host}:6379/"
+          { echo "CI_POSTGRES_URL=$pg"; echo "CI_REDIS_URL=$rd"; } >> "$GITHUB_ENV"
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            line="${line//\$\{CI_POSTGRES_URL\}/$pg}"
+            line="${line//\$\{CI_REDIS_URL\}/$rd}"
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "$LINES"
+      - name: Compute cache workspaces
+        id: ws
+        shell: bash
+        env:
+          MAIN: ${{ inputs.working-directory }}
+          EXTRA: ${{ inputs.extra-directories }}
+        run: |
+          {
+            echo "list<<__EOF__"
+            echo "$MAIN -> target"
+            while IFS= read -r d; do [ -z "$d" ] || echo "$d -> target"; done <<< "$EXTRA"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+      - uses: seiunx-dev/ci-templates/actions/setup-rust@v1
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          components: ${{ inputs.coverage && 'llvm-tools-preview' || '' }}
+          targets: ${{ inputs.targets }}
+          working-directory: ${{ inputs.working-directory }}
+          cache-key: ${{ inputs.cache-key-prefix }}-${{ inputs.coverage && 'coverage' || 'test' }}
+          cache-workspaces: ${{ steps.ws.outputs.list }}
+      - name: Install cargo-llvm-cov
+        if: inputs.coverage
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-llvm-cov@${{ inputs.cargo-llvm-cov-version }}
+          fallback: none
+      - name: Setup hook
+        if: inputs.setup-command != ''
+        shell: bash
+        run: ${{ inputs.setup-command }}
+      - name: Tests
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          COVERAGE: ${{ inputs.coverage }}
+          CARGO_ARGS: ${{ inputs.cargo-args }}
+          FEATURE_SETS: ${{ inputs.test-feature-sets }}
+          TEST_ARGS: ${{ inputs.test-args }}
+          HARNESS_ARGS: ${{ inputs.test-harness-args }}
+          EXTRA_TEST: ${{ inputs.extra-test-command }}
+        run: |
+          set -euo pipefail
+          if [ "$COVERAGE" = true ]; then
+            cargo llvm-cov clean --workspace
+            CARGO_TEST="cargo llvm-cov --no-report"
+          else
+            CARGO_TEST="cargo test"
+          fi
+          export CARGO_TEST
+          sets=()  # bash 3.2 compatible (macOS)
+          while IFS= read -r l; do [ -z "${l//[[:space:]]/}" ] || sets+=("$l"); done <<< "$FEATURE_SETS"
+          [ "${#sets[@]}" -gt 0 ] || sets=(default)
+          for set in "${sets[@]}"; do
+            flags="$set"; [ "$flags" = default ] && flags=""
+            echo "::group::$CARGO_TEST $flags"
+            eval "$CARGO_TEST --locked $CARGO_ARGS $flags $TEST_ARGS ${HARNESS_ARGS:+-- $HARNESS_ARGS}"
+            echo "::endgroup::"
+          done
+          if [ -n "$EXTRA_TEST" ]; then
+            echo "::group::extra tests"; eval "$EXTRA_TEST"; echo "::endgroup::"
+          fi
+      - name: Tests (extra directories)
+        if: inputs.extra-directories != ''
+        shell: bash
+        env:
+          EXTRA: ${{ inputs.extra-directories }}
+        run: |
+          set -euo pipefail
+          for dir in $EXTRA; do
+            echo "::group::test $dir"; (cd "$dir" && cargo test --locked); echo "::endgroup::"
+          done
+      - name: Coverage report
+        if: inputs.coverage
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          FAIL_UNDER: ${{ inputs.coverage-fail-under-lines }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/coverage"
+          cargo llvm-cov report --lcov --output-path "$GITHUB_WORKSPACE/coverage/lcov-rust.info"
+          cargo llvm-cov report --summary-only | tail -n 3
+          if [ -n "$FAIL_UNDER" ]; then cargo llvm-cov report --summary-only --fail-under-lines "$FAIL_UNDER" > /dev/null; fi
+      - name: Upload coverage
+        if: inputs.coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ inputs.cache-key-prefix }}
+          path: coverage/
+          retention-days: 3
+          if-no-files-found: error
+
+  test-services:
+    name: Test
+    if: inputs.postgres-image != '' || inputs.redis-image != '' || inputs.container != ''
+    runs-on: ${{ inputs.runs-on }}
+    container: ${{ inputs.container }}
+    timeout-minutes: ${{ inputs.test-timeout-minutes }}
+    services:
+      postgres:
+        image: ${{ inputs.postgres-image }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: ${{ inputs.redis-image }}
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps: *test-steps
+
+  msrv:
+    name: MSRV ${{ inputs.msrv }}
+    if: inputs.msrv != ''
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.lint-timeout-minutes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: ${{ inputs.submodules }}
+          persist-credentials: false
+      - uses: seiunx-dev/ci-templates/actions/apt-install@v1
+        with:
+          packages: ${{ inputs.apt-packages }}
+      - uses: seiunx-dev/ci-templates/actions/setup-rust@v1
+        with:
+          toolchain: ${{ inputs.msrv }}
+          working-directory: ${{ inputs.working-directory }}
+          cache-key: ${{ inputs.cache-key-prefix }}-msrv
+      - name: Setup hook
+        if: inputs.setup-command != ''
+        shell: bash
+        run: ${{ inputs.setup-command }}
+      - name: cargo check on MSRV
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          CARGO_ARGS: ${{ inputs.cargo-args }}
+          MSRV: ${{ inputs.msrv }}
+        run: |
+          # shellcheck disable=SC2086
+          cargo "+$MSRV" check --locked $CARGO_ARGS

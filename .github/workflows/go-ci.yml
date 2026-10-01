@@ -1,0 +1,317 @@
+# Reusable Go CI: `lint` (gofmt, go vet, staticcheck with the "(compile)" guard,
+# go mod tidy -diff, optional govulncheck, go build) and `test` (go test -race, optional
+# coverage + threshold, optional Postgres/Redis), plus an optional bun frontend job.
+#
+# Go caches are keyed per job and per commit with go.sum-scoped restore keys, and saved
+# only from the default branch, so GOCACHE is refreshed on every main push instead of
+# freezing at the first go.sum hit (the setup-go default).
+#
+# The Go version comes from go.mod (GOTOOLCHAIN=local, so a go.mod newer than the
+# installed toolchain fails instead of silently downloading another one).
+name: Go CI
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        type: string
+        default: "."
+      go-version-file:
+        description: File that pins the Go version (go.mod or .go-version).
+        type: string
+        default: go.mod
+      build-flags:
+        description: Flags for go build/vet/test (e.g. -mod=readonly).
+        type: string
+        default: -mod=readonly
+      staticcheck:
+        description: "auto (go tool staticcheck if go.mod declares it, else go run @staticcheck-version) | off"
+        type: string
+        default: auto
+      staticcheck-version:
+        type: string
+        default: "2026.2"
+      staticcheck-command:
+        description: Full override, e.g. "go run -modfile=.github/tools/go.mod honnef.co/go/tools/cmd/staticcheck".
+        type: string
+        default: ""
+      govulncheck:
+        description: Run govulncheck (golang.org/x/vuln/cmd/govulncheck@latest).
+        type: boolean
+        default: false
+      tidy-check:
+        description: Fail when go mod tidy would change go.mod/go.sum.
+        type: boolean
+        default: true
+      race:
+        type: boolean
+        default: true
+      test-packages:
+        type: string
+        default: ./...
+      test-args:
+        type: string
+        default: -count=1
+      coverage:
+        description: Write coverage/go.out (atomic) from the same race test run and upload coverage-go.
+        type: boolean
+        default: false
+      coverpkg-exclude:
+        description: Regex of packages to leave out of -coverpkg (e.g. /database/ent). Empty = default coverpkg.
+        type: string
+        default: ""
+      coverage-threshold:
+        description: Minimum total statement coverage percent (empty = no gate).
+        type: string
+        default: ""
+      postgres-image:
+        type: string
+        default: ""
+      redis-image:
+        type: string
+        default: ""
+      env:
+        description: KEY=VALUE lines for the test job. ${CI_POSTGRES_URL} / ${CI_REDIS_URL} are substituted.
+        type: string
+        default: ""
+      frontend-directory:
+        description: Directory of a bun frontend to check (empty = no frontend job).
+        type: string
+        default: ""
+      bun-version:
+        description: Bun version for the frontend (e.g. 1.3.14). Empty = bun-version-file or package.json packageManager.
+        type: string
+        default: ""
+      frontend-commands:
+        description: Commands run in the frontend directory after `bun install --frozen-lockfile`, one per line.
+        type: string
+        default: bun run build
+      runs-on:
+        type: string
+        default: ubuntu-latest
+      timeout-minutes:
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+          cache: false
+      - name: Go cache paths
+        id: paths
+        run: |
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+      - name: Restore Go cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.paths.outputs.mod }}
+            ${{ steps.paths.outputs.build }}
+          key: go-lint-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-lint-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+            go-lint-${{ runner.os }}-
+      - name: gofmt
+        run: |
+          # shellcheck disable=SC2046
+          unformatted="$(gofmt -l $(git ls-files '*.go'))"
+          if [ -n "$unformatted" ]; then
+            echo "::error::files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - name: go mod tidy -diff
+        if: inputs.tidy-check
+        run: go mod tidy -diff
+      - name: go build
+        env:
+          FLAGS: ${{ inputs.build-flags }}
+        run: |
+          # shellcheck disable=SC2086
+          go build $FLAGS ./...
+      - name: go vet
+        env:
+          FLAGS: ${{ inputs.build-flags }}
+        run: |
+          # shellcheck disable=SC2086
+          go vet $FLAGS ./...
+      - name: staticcheck
+        if: inputs.staticcheck != 'off'
+        env:
+          OVERRIDE: ${{ inputs.staticcheck-command }}
+          VERSION: ${{ inputs.staticcheck-version }}
+        run: |
+          set -o pipefail
+          if [ -n "$OVERRIDE" ]; then cmd="$OVERRIDE"
+          elif grep -Eq '^[[:space:]]*(tool[[:space:]]+)?honnef\.co/go/tools/cmd/staticcheck[[:space:]]*$' go.mod; then cmd="go tool staticcheck"
+          else cmd="go run honnef.co/go/tools/cmd/staticcheck@${VERSION}"; fi
+          echo "running: $cmd"
+          $cmd ./... 2>&1 | tee "$RUNNER_TEMP/staticcheck.log"
+          # staticcheck exits 0 when it cannot load a package; those show up as "(compile)" lines.
+          if grep -q '(compile)' "$RUNNER_TEMP/staticcheck.log"; then
+            echo "::error::staticcheck could not analyse the module ((compile) errors)"; exit 1
+          fi
+      - name: govulncheck
+        if: inputs.govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: Save Go cache
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.paths.outputs.mod }}
+            ${{ steps.paths.outputs.build }}
+          key: go-lint-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+
+  test:
+    name: Test
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    services:
+      postgres:
+        image: ${{ inputs.postgres-image }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: ${{ inputs.redis-image }}
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+          cache: false
+      - name: Go cache paths
+        id: paths
+        run: |
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+      - name: Restore Go cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.paths.outputs.mod }}
+            ${{ steps.paths.outputs.build }}
+          key: go-test-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-test-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+            go-test-${{ runner.os }}-
+      - name: Export env and service URLs
+        env:
+          LINES: ${{ inputs.env }}
+        run: |
+          pg="postgres://postgres:postgres@localhost:5432/test?sslmode=disable"
+          rd="redis://localhost:6379/"
+          { echo "CI_POSTGRES_URL=$pg"; echo "CI_REDIS_URL=$rd"; } >> "$GITHUB_ENV"
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            line="${line//\$\{CI_POSTGRES_URL\}/$pg}"
+            line="${line//\$\{CI_REDIS_URL\}/$rd}"
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "$LINES"
+      - name: go test
+        env:
+          FLAGS: ${{ inputs.build-flags }}
+          RACE: ${{ inputs.race }}
+          PKGS: ${{ inputs.test-packages }}
+          ARGS: ${{ inputs.test-args }}
+          COVERAGE: ${{ inputs.coverage }}
+          EXCLUDE: ${{ inputs.coverpkg-exclude }}
+        run: |
+          set -euo pipefail
+          extra=()
+          [ "$RACE" = true ] && extra+=(-race)
+          if [ "$COVERAGE" = true ]; then
+            mkdir -p "$GITHUB_WORKSPACE/coverage"
+            extra+=(-covermode=atomic "-coverprofile=$GITHUB_WORKSPACE/coverage/go.out")
+            if [ -n "$EXCLUDE" ]; then
+              extra+=("-coverpkg=$(go list ./... | grep -Ev "$EXCLUDE" | paste -sd, -)")
+            fi
+          fi
+          # shellcheck disable=SC2086
+          go test $FLAGS "${extra[@]}" $ARGS $PKGS
+      - name: Coverage threshold
+        if: inputs.coverage && inputs.coverage-threshold != ''
+        env:
+          MIN: ${{ inputs.coverage-threshold }}
+        run: |
+          total=$(go tool cover -func="$GITHUB_WORKSPACE/coverage/go.out" | awk '/^total:/ {gsub("%","",$3); print $3}')
+          echo "total coverage: ${total}% (minimum ${MIN}%)"
+          awk -v t="$total" -v m="$MIN" 'BEGIN { exit !(t+0 >= m+0) }' || { echo "::error::coverage ${total}% < ${MIN}%"; exit 1; }
+      - name: Upload coverage
+        if: inputs.coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-go
+          path: coverage/
+          retention-days: 3
+          if-no-files-found: error
+      - name: Save Go cache
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.paths.outputs.mod }}
+            ${{ steps.paths.outputs.build }}
+          key: go-test-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+
+  frontend:
+    name: Frontend
+    if: inputs.frontend-directory != ''
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.frontend-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ inputs.bun-version }}
+          bun-version-file: ${{ inputs.bun-version == '' && format('{0}/package.json', inputs.frontend-directory) || '' }}
+      - name: bun install
+        run: bun install --frozen-lockfile
+      - name: Frontend checks
+        env:
+          COMMANDS: ${{ inputs.frontend-commands }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r cmd; do
+            [ -n "$cmd" ] || continue
+            echo "::group::$cmd"; eval "$cmd"; echo "::endgroup::"
+          done <<< "$COMMANDS"

@@ -1,0 +1,116 @@
+# Reusable SonarQube Cloud scan. It does not build or test anything: it downloads the
+# coverage artifacts that the language CI jobs uploaded (coverage-*), and scans.
+#
+# Skips cleanly (green, with a notice) when SONAR_TOKEN is unavailable: Dependabot PRs,
+# fork PRs, or repos without the secret.
+#
+# Report paths are passed on the command line (they override sonar-project.properties), so a
+# stale `*.reportPaths` in a repo's properties file cannot silently drop coverage to 0%:
+#   coverage/lcov-rust.info -> sonar.rust.lcov.reportPaths
+#   coverage/go.out         -> sonar.go.coverage.reportPaths
+#   coverage/python.xml     -> sonar.python.coverage.reportPaths
+#   coverage/lcov-js.info   -> sonar.javascript.lcov.reportPaths
+#   coverage/cpp.xml        -> sonar.coverageReportPaths (generic format, e.g. gcovr --sonarqube)
+# Only files that were actually downloaded are passed. Set `report-paths: false` to opt out.
+#
+# Caller example:
+#   sonar:
+#     needs: [rust]
+#     uses: seiunx-dev/ci-templates/.github/workflows/sonar.yml@v1
+#     secrets:
+#       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+name: Sonar
+
+on:
+  workflow_call:
+    inputs:
+      coverage-pattern:
+        description: Artifact name pattern to download into coverage/ (empty = none).
+        type: string
+        default: coverage-*
+      project-version:
+        description: sonar.projectVersion (leave empty; do not hard-code it in sonar-project.properties).
+        type: string
+        default: ""
+      args:
+        description: Extra scanner arguments (e.g. -Dsonar.qualitygate.wait=true).
+        type: string
+        default: ""
+      report-paths:
+        description: Pass the report path of every downloaded coverage file (see header).
+        type: boolean
+        default: true
+      timeout-minutes:
+        type: number
+        default: 15
+    secrets:
+      SONAR_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan
+    # Secrets are not passed to Dependabot or fork PR runs; skip instead of failing.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - name: Check token
+        id: token
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "::notice::SONAR_TOKEN is not available to this run; skipping the scan."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.token.outputs.present == 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download coverage
+        if: steps.token.outputs.present == 'true' && inputs.coverage-pattern != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ${{ inputs.coverage-pattern }}
+          path: coverage
+          merge-multiple: true
+      - name: Build scanner arguments
+        if: steps.token.outputs.present == 'true'
+        id: args
+        env:
+          VERSION: ${{ inputs.project-version }}
+          EXTRA: ${{ inputs.args }}
+          AUTO: ${{ inputs.report-paths }}
+        run: |
+          args="$EXTRA"
+          [ -n "$VERSION" ] && args="$args -Dsonar.projectVersion=$VERSION"
+          if [ "$AUTO" = true ]; then
+            while read -r file prop; do
+              if [ -f "coverage/$file" ]; then args="$args -D$prop=coverage/$file"; fi
+            done <<'MAP'
+          lcov-rust.info sonar.rust.lcov.reportPaths
+          go.out sonar.go.coverage.reportPaths
+          python.xml sonar.python.coverage.reportPaths
+          lcov-js.info sonar.javascript.lcov.reportPaths
+          cpp.xml sonar.coverageReportPaths
+          MAP
+          fi
+          echo "args=$args" >> "$GITHUB_OUTPUT"
+          echo "scanner args: $args"
+          ls -la coverage 2>/dev/null || echo "no coverage files"
+      - name: SonarQube scan
+        if: steps.token.outputs.present == 'true'
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: ${{ steps.args.outputs.args }}
