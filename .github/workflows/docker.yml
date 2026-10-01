@@ -23,6 +23,9 @@
 # overwrite each other) or `registry` (<image>:buildcache, recommended for heavy Rust
 # images since it does not count against the 10 GB Actions cache quota).
 #
+# Build records: build-push-action uploads one .dockerbuild artifact per build (3 days);
+# `build-record: false` turns that off for private repos that pay for artifact storage.
+#
 # Caller job permissions: contents: read, packages: write, pull-requests: read
 # (packages: write is never used on pull_request runs: they only read the registry cache;
 # fork and Dependabot PR tokens are read-only anyway).
@@ -105,6 +108,13 @@ on:
       sbom:
         type: string
         default: "false"
+      build-record:
+        description: >-
+          Upload the build record artifact (<owner>~<repo>~<id>.dockerbuild, kept 3 days).
+          false skips it: private repos pay for artifact storage, and once the account's quota
+          is full every upload-artifact step in every workflow of the account fails.
+        type: boolean
+        default: true
       artifact-name:
         description: Same-run workflow artifact to download before the build (e.g. prebuilt binaries). Supports a glob pattern.
         type: string
@@ -374,6 +384,8 @@ jobs:
       - name: Build${{ github.event_name != 'pull_request' && ' and push' || '' }}
         id: build
         if: steps.paths.outputs.build == 'true' && steps.promote.outputs.promoted != 'true'
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: ${{ inputs.build-record }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ inputs.context }}

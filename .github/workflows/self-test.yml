@@ -150,6 +150,7 @@ jobs:
       platforms: linux/amd64,linux/arm64
       version-build-arg: APP_VERSION
       cache-backend: registry
+      build-record: false
       pr-paths: |
         tests/fixtures/docker/**
         .github/workflows/docker.yml
@@ -169,7 +170,29 @@ jobs:
       context: tests/fixtures/docker
       version-build-arg: APP_VERSION
       cache-backend: registry
+      build-record: false
       defer-moving-tags: true
+
+  # Both docker jobs above set build-record: false, so this run must not carry a .dockerbuild
+  # artifact (build-push-action uploads one per build by default).
+  docker-build-record:
+    name: docker (no build record artifact)
+    needs: [docker, docker-push]
+    if: ${{ !cancelled() && (needs.docker.result == 'success' || needs.docker-push.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Check the run's artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          names=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].name')
+          printf 'artifacts so far:\n%s\n' "$names"
+          if grep -q '[.]dockerbuild$' <<< "$names"; then
+            echo "::error::a docker job with build-record: false uploaded a build record"; exit 1
+          fi
 
   docker-before:
     name: docker (sha tags pushed, moving tag not yet)
@@ -401,6 +424,7 @@ jobs:
       - node-bun
       - docker
       - docker-push
+      - docker-build-record
       - docker-before
       - fake-ci-ok
       - docker-retag
