@@ -2,6 +2,10 @@
 
 本仓库按 [版本策略](README.md#版本策略) 发布：`v1.x.y` 不可变，`v1` 跟随最新的 `v1.x.y`。
 
+## v1.1.8 — 2026-10-01
+
+- `rust-ci.yml` 新增 `lint`（默认 `true`，行为不变）：`false` 时不跑 lint job（fmt、clippy、`extra-lint-command`），只跑测试。用于在其他 OS 上额外调用一次、代码已由主调用 lint 过的情况：seiunx-dev/unity-rs 原来在 Windows / macOS 上只跑 build + test，迁移后多出的 Windows clippy 会因为只在 Windows 下编译的代码报 pedantic lint 而失败，也多花一份 runner 时间。自测的 macOS 调用改为 `lint: false`。
+
 ## v1.1.7 — 2026-10-01
 
 - `python-uv-ci.yml` 的 ruff 步骤：uv.lock 里有 ruff 时改为 `uvx ruff@<锁定版本>`，不再用 `uv run --frozen ruff`。`uv run` 只同步默认依赖组，ruff 写在 optional extra（如 `[project.optional-dependencies] dev`）里时根本没装，lint job 报 `Failed to spawn: ruff`（MejiroRina/lambda-sekai-asset-unpack）。现在不管 ruff 由哪个 extra / group 引入，用的都是锁定的版本；没有锁定时仍是 `uvx ruff`。py-min fixture 把 ruff 放进 optional extra `lint`，覆盖这种情况。

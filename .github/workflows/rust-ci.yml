@@ -79,6 +79,12 @@ on:
         description: Run cargo fmt --check.
         type: boolean
         default: true
+      lint:
+        description: >-
+          Run the lint job (fmt, clippy, extra-lint-command). false = test job only, for an extra
+          call on another OS whose code is already linted by the main call.
+        type: boolean
+        default: true
       coverage:
         description: Run tests under cargo-llvm-cov and upload coverage/lcov-rust.info.
         type: boolean
@@ -151,7 +157,7 @@ env:
 jobs:
   lint:
     name: Lint
-    if: inputs.container == ''
+    if: inputs.lint && inputs.container == ''
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.lint-timeout-minutes }}
     steps: &lint-steps
@@ -241,7 +247,7 @@ jobs:
 
   lint-container:
     name: Lint
-    if: inputs.container != ''
+    if: inputs.lint && inputs.container != ''
     runs-on: ${{ inputs.runs-on }}
     container: ${{ inputs.container }}
     timeout-minutes: ${{ inputs.lint-timeout-minutes }}
