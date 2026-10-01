@@ -2,6 +2,11 @@
 
 本仓库按 [版本策略](README.md#版本策略) 发布：`v1.x.y` 不可变，`v1` 跟随最新的 `v1.x.y`。
 
+## v1.1.1 — 2026-10-01
+
+- `docker-retag.yml`：写入后等 10 秒再检查一次（最多写 3 次）。两个 main run 几乎同时结束时，旧 commit 的 run 可能在新 run 写入前读到 tag、在它之后写入，把 `:main` 拨回旧 commit；新 run 的复查会发现并写回。不用 concurrency group，因为它会取消排队中的 job。
+- 新增 `tests/docker_retag_test.sh`（桩掉 docker / gh，覆盖顺序保护的各分支），自测的 `yaml` job 会运行它。
+
 ## v1.1.0 — 2026-10-01
 
 - **Docker 不再等测试**：`docker.yml` 新增 `defer-moving-tags`（默认 `false`，旧行为不变）和输出 `deferred-tags`；新增可复用工作流 `docker-retag.yml`。调用方去掉 docker job 的 `needs: [<测试>]`、设 `defer-moving-tags: true`，并在 `ci-ok` 之后加 `docker-tags` job。main 上构建完立刻推 `:sha-<sha>` / `:sha-<7>`（和 `:buildcache`），`:main` 等移动 tag 在 "CI OK" 通过后才重打到同一个 digest（不重建，带新旧 commit 顺序保护）。

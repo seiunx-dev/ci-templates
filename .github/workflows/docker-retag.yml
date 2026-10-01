@@ -7,7 +7,9 @@
 # Ordering guard: runs of consecutive commits finish in any order. Before moving a tag, the
 # commit recorded in the image it currently points to (label org.opencontainers.image.revision,
 # set by docker.yml) is compared with this run's commit through the GitHub compare API; when
-# the tag already holds a newer commit, it is left alone. Disable with `check-ancestry: false`.
+# the tag already holds a newer commit, it is left alone. After writing, the job waits 10 s and
+# checks again (up to three writes), so a run of an older commit that read the tag just before
+# this write and wrote just after it is corrected. Disable with `check-ancestry: false`.
 #
 # Caller example (ci.yml):
 #   docker-tags:
@@ -109,35 +111,59 @@ jobs:
               | .config.Labels["org.opencontainers.image.revision"] // empty' 2> /dev/null || true
           }
 
-          args=(); moved=""
+          # wants <tag> <pass>: should the tag point at this run's image?
+          wants() {
+            local current status
+            if [ "$CHECK" != true ]; then [ "$2" = 1 ]; return; fi
+            current=$(revision "$1")
+            if [ -z "$current" ]; then [ "$2" = 1 ]; return; fi  # new tag or no revision label
+            if [ "$current" = "$GITHUB_SHA" ]; then
+              [ "$2" != 1 ] || echo "$1 already holds ${GITHUB_SHA::7}"
+              return 1
+            fi
+            status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$current...$GITHUB_SHA" --jq .status 2> /dev/null || echo unknown)
+            case "$status" in
+              ahead) return 0 ;;
+              behind|identical)
+                [ "$2" != 1 ] || echo "::notice::$1 holds ${current::7}, which is newer than ${GITHUB_SHA::7}; left alone"
+                return 1 ;;
+              *)
+                [ "$2" = 1 ] || return 1
+                echo "::warning::cannot order ${current::7} and ${GITHUB_SHA::7} (compare: $status); moving $1 anyway" ;;
+            esac
+          }
+
+          tags=()
           while IFS= read -r t; do
             t="${t#"${t%%[![:space:]]*}"}"; t="${t%"${t##*[![:space:]]}"}"
             [ -n "$t" ] || continue
             [[ "${t##*/}" == *:* ]] || t="$IMAGE:$t"
-            if [ "$CHECK" = true ]; then
-              current=$(revision "$t")
-              if [ "$current" = "$GITHUB_SHA" ]; then
-                echo "$t already holds $GITHUB_SHA"
-              elif [ -n "$current" ]; then
-                status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$current...$GITHUB_SHA" --jq .status 2> /dev/null || echo unknown)
-                case "$status" in
-                  behind)
-                    echo "::notice::$t holds ${current::7}, which is newer than ${GITHUB_SHA::7}; left alone"
-                    continue ;;
-                  ahead|identical) ;;
-                  *) echo "::warning::cannot order ${current::7} and ${GITHUB_SHA::7} (compare: $status); moving $t anyway" ;;
-                esac
-              fi
-            fi
-            args+=(--tag "$t"); moved="$moved$t"$'\n'
+            tags+=("$t")
           done <<< "$TAGS"
 
-          if [ "${#args[@]}" -gt 0 ]; then
+          # Check, write, wait, check again: when main runs of two commits finish together, the
+          # older one can read the tag before the newer one writes it and then write last. The
+          # newer run sees that on its re-check and writes again, so the tag ends on the newest
+          # commit (a concurrency group cannot do this: it cancels pending jobs).
+          moved=""
+          for pass in 1 2 3; do
+            args=()
+            for t in "${tags[@]}"; do
+              if wants "$t" "$pass"; then
+                args+=(--tag "$t")
+                case $'\n'"$moved" in *$'\n'"$t"$'\n'*) ;; *) moved="$moved$t"$'\n' ;; esac
+              fi
+            done
+            if [ "${#args[@]}" -eq 0 ]; then
+              [ "$pass" != 1 ] || echo "No tag to move."
+              break
+            fi
+            [ "$pass" = 1 ] || echo "::notice::a run of an older commit overwrote the tag(s); moving again"
             # --prefer-index=false: a single-platform image is tagged as the same manifest (same
             # digest) instead of being wrapped in a new one-entry index; an index is copied as is.
             docker buildx imagetools create --prefer-index=false "${args[@]}" "$src"
-            printf 'Moved to %s:\n%s' "$src" "$moved"
-          else
-            echo "No tag to move."
-          fi
+            echo "Moved to $src:"; for ((i = 1; i < ${#args[@]}; i += 2)); do echo "  ${args[i]}"; done
+            [ "$CHECK" = true ] || break
+            sleep 10
+          done
           { echo "moved<<__EOF__"; printf '%s' "$moved"; echo "__EOF__"; } >> "$GITHUB_OUTPUT"
