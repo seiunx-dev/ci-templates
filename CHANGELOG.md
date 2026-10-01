@@ -2,6 +2,11 @@
 
 本仓库按 [版本策略](README.md#版本策略) 发布：`v1.x.y` 不可变，`v1` 跟随最新的 `v1.x.y`。
 
+## v1.1.5 — 2026-10-01
+
+- `actions/verify-version`（release-gate）新增版本来源 `go`：读 Go 文件里赋给 `Version` 的字符串（默认 `version/version.go`；支持 `var Version = "..."`、`const Version = ...` 和 var 块里的 `Version = ...`），去掉开头的 tag 前缀后与 tag 比较。用于版本号写在 Go 源码、发布时再用 `-ldflags -X` 注入 tag 的仓库（Team-Haruki/Haruki-Toolbox-Backend 的 `version.Version = "v9.0.0-rc3"`）。`extra-paths` 里的 `.go` 文件同样按这个规则读取。其他来源不变。
+- `tests/verify_version_test.sh` 覆盖 `go`（带 / 不带前缀、var 块 / 带类型的 const、extra path 不一致时失败）和 `none`。
+
 ## v1.1.4 — 2026-10-01
 
 - `docker.yml`：`cache-backend: registry` 时，PR 构建也登录 GHCR（只读 `:buildcache`，仍然不推送）。私有仓库的镜像不能匿名读取，之前 PR 上缓存导入失败（`failed to fetch anonymous token`），每次都是冷构建（MejiroRina/kinagi-api 的 PR 构建 13 分钟，cargo-chef 的依赖层完全没用上）。同仓库 PR 登录失败会报错；fork 和 Dependabot 的 token 可能没有 `packages: read`，登录失败时只是退回无缓存构建。gha 缓存和 public 仓库不受影响。

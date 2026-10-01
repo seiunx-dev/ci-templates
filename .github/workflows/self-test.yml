@@ -49,7 +49,7 @@ jobs:
         run: python3 tests/sonar_args_test.py
       - name: docker-retag.yml ordering guard against stubbed docker / gh
         run: bash tests/docker_retag_test.sh
-      - name: verify-version event / ref matrix (only a tag push publishes)
+      - name: verify-version event / ref matrix (only a tag push publishes) and go / none sources
         run: bash tests/verify_version_test.sh
 
   # rust-ci has two variants of each job: the plain one (no services:/container: keys) runs on
