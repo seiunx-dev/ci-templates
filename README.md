@@ -186,6 +186,7 @@ jobs:
 - 不兼容的改动（删除或改名 input、改默认行为、改构件名）→ 发 `v2.0.0` 和 `v2`；`v1` 不再前进（只回补安全修复）。
 - 模板内部引用 composite action 用的是 `seiunx-dev/ci-templates/actions/<name>@v1`，所以调用方即使 pin 到 `@v1.2.3` 或 commit SHA，composite action 仍然跟随 `v1`。需要完全冻结的仓库只能 fork。
 - 每次发布在 `CHANGELOG.md` 记一节，并创建同名 GitHub Release。
+- GitHub Release 的说明按 [RELEASE_NOTES.md](RELEASE_NOTES.md) 写；这份规范适用于 seiunx-dev / Team-Haruki / MejiroRina 下所有发布 release 的仓库。
 
 ### 发布本仓库
 

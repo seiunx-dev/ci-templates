@@ -46,3 +46,4 @@ actionlint + shellcheck 在 CI 里由 `actionlint.yml` 跑（版本见该文件�
 - 提交标题：`[Feat]` / `[Fix]` / `[Docs]` / `[Test]` / `[Chore]` 加英文祈使句，例如 `[Fix] Run the locked ruff via uvx in python-uv-ci (#12)`；正文写原因和影响到的调用方。
 - 分支名 `feat/…`、`fix/…`、`docs/…`，通过 PR squash 合并到 `main`，合并前等 `CI OK` 变绿。
 - 发布：`v1.x.y` 是不可变 annotated tag（仓库 ruleset 禁止更新、删除 `v*.*.*` tag，打错只能发下一个版本），`v1` 是移动 tag，始终指向最新的 `v1.x.y`；每次发布同时创建同名 GitHub Release。具体命令见 README“发布本仓库”。
+- Release 说明按 [RELEASE_NOTES.md](RELEASE_NOTES.md) 写（全组织通用的 release notes 规范）。
