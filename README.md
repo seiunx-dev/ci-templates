@@ -249,7 +249,7 @@ python3 tools/check_callers.py --callers DIR --clones CLONES_DIR
 
 ### `rust-ci.yml` — Rust CI
 
-Jobs：`Lint`（fmt + 每个 feature set 跑 clippy `-D warnings`）、`Test`（cargo test 或 cargo-llvm-cov，上传 `coverage-<cache-key-prefix>`）、可选 `MSRV`。设了 `postgres-image` / `redis-image` / `container` 时走带 `services:`/`container:` 的变体（仅 Linux）。
+Jobs：`Lint`（fmt + 每个 feature set 跑 clippy `-D warnings`；`lint: false` 时不跑）、`Test`（cargo test 或 cargo-llvm-cov，上传 `coverage-<cache-key-prefix>`）、可选 `MSRV`。设了 `postgres-image` / `redis-image` / `container` 时走带 `services:`/`container:` 的变体（仅 Linux）。
 
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -265,6 +265,7 @@ Jobs：`Lint`（fmt + 每个 feature set 跑 clippy `-D warnings`）、`Test`（
 | `extra-test-command` | string | `''` | Shell run after the main tests with the services up. $CARGO_TEST is `cargo test` or `cargo llvm-cov --no-report` (coverage mode), e.g. `$CARGO_TEST --locked --lib -- --ignored --test-threads=1 db::tests postgres`. Always pass a test-name filter: a bare `--ignored` also runs network, credential and memory-probe tests that are ignored for a reason. |
 | `extra-lint-command` | string | `''` | Shell run at the end of the lint job (e.g. a wasm32 check, cargo doc, cargo audit). |
 | `fmt` | boolean | `true` | Run cargo fmt --check. |
+| `lint` | boolean | `true` | Run the lint job (fmt, clippy, extra-lint-command). false = test job only, for an extra call on another OS whose code is already linted by the main call. |
 | `coverage` | boolean | `false` | Run tests under cargo-llvm-cov and upload coverage/lcov-rust.info. |
 | `coverage-fail-under-lines` | string | `''` | Minimum line coverage percentage (empty = no gate). |
 | `cargo-llvm-cov-version` | string | `0.9.0` | cargo-llvm-cov version installed by taiki-e/install-action. |
