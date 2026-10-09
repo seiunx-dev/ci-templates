@@ -214,7 +214,7 @@ jobs:
   - rust-release：cargo（linux/macOS/Windows）+ zigbuild（glibc 2.17），随后检查产物文件名、tar.gz/zip、dir/flat 布局、额外文件和 glibc 符号版本；
   - docker：PR 上构建 amd64 + arm64（不推送；用 registry 缓存，覆盖只读登录和 pr-paths 过滤）；两个 docker job 都设 `build-record: false`，随后检查本次 run 没有 `.dockerbuild` 构件；push main 和 workflow_dispatch 时走 `defer-moving-tags` 推送路径，镜像是一次性的 `ghcr.io/seiunx-dev/ci-templates-selftest`：先检查 `:sha-*` 已推、分支 tag 没动，过一个替身 "CI OK" job，再用 `docker-retag.yml` 移分支 tag，最后检查分支 tag 指向同一个 digest（没有重建）；pages：只构建（`deploy: false`）。
   - sonar：`tests/sonar_args_test.py` 单元测试参数构建（multicriteria 合并、properties 语法、`project-version: auto`、report paths）。
-- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖；`verify-version` 的事件 / ref 组合（只有 tag push 发布）由 `tests/verify_version_test.sh` 覆盖。
+- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖；`verify-version` 的事件 / ref 组合（只有 tag push 发布）由 `tests/verify_version_test.sh` 覆盖。`maturin-wheels.yml` 冒烟测试的 `test` 条件由 `maturin-test-guard` job 在 GitHub 上对 `test` 缺省 / false / true 求值，`tests/maturin_test_guard_test.py` 检查两处用的是同一个表达式，并禁止表达式与裸 `true` / `false` 比较（缺省的 key 是 null，null == false）。
 
 ## 迁移前检查
 
@@ -498,7 +498,7 @@ Job：`Build`。产物：构件 `release-go`，可选 `bin-go`。`binaries` 每�
 
 ### `maturin-wheels.yml` — Maturin wheels
 
-Jobs：每个 target × variant 一个 wheel job（构件 `wheels-<variant>-<label>`），可选 `sdist`（`wheels-sdist-<variant>`）。abi3 crate 用默认 `interpreters`；非 abi3 用 `find` + `setup-python-versions`。`targets` 每项字段：`label`、`os`、`target`，可选 `manylinux`、`interpreters`、`test`。
+Jobs：每个 target × variant 一个 wheel job（构件 `wheels-<variant>-<label>`），可选 `sdist`（`wheels-sdist-<variant>`）。abi3 crate 用默认 `interpreters`；非 abi3 用 `find` + `setup-python-versions`。`targets` 每项字段：`label`、`os`、`target`，可选 `manylinux`、`interpreters`、`test`（只有 `"test": false` 跳过冒烟测试和 `test-command`；不写即测试）。
 
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|

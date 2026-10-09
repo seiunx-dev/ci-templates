@@ -2,6 +2,11 @@
 
 本仓库按 [版本策略](README.md#版本策略) 发布：`v1.x.y` 不可变，`v1` 跟随最新的 `v1.x.y`。
 
+## v1.1.9 — 2026-10-09
+
+- `maturin-wheels.yml`：没写 `test` 的 target 现在会跑冒烟测试和 `test-command`。之前的条件是 `matrix.t.test != false`，而缺省的 key 是 null，GitHub 表达式里 null 和 false 比较相等（都转成 0），所以只有显式写了 `"test": true` 的 target 才测试，与文件头"false to skip"的约定相反（Team-Haruki/pjsekai-scores-rs 发现）。改为 `toJSON(matrix.t.test) != 'false'`，只有 `"test": false` 跳过。影响：seiunx-dev/cridecoder、seiunx-dev/unity-rs 的 wheel job 从这一版起真正安装并导入 wheel（unity-rs 还会跑 `test-command`）；显式写 `true` / `false` 的调用方不变。
+- 新增 `tests/maturin_test_guard_test.py`：检查两个步骤用的是这个条件、自测的 `maturin-test-guard` job 用的是同一个表达式，并禁止任何工作流 / action 的表达式与裸 `true` / `false` 比较。自测新增 `maturin-test-guard` job，在 GitHub 上对 `test` 缺省 / false / true 三种 target 实际求值。
+
 ## v1.1.8 — 2026-10-01
 
 - `rust-ci.yml` 新增 `lint`（默认 `true`，行为不变）：`false` 时不跑 lint job（fmt、clippy、`extra-lint-command`），只跑测试。用于在其他 OS 上额外调用一次、代码已由主调用 lint 过的情况：seiunx-dev/unity-rs 原来在 Windows / macOS 上只跑 build + test，迁移后多出的 Windows clippy 会因为只在 Windows 下编译的代码报 pedantic lint 而失败，也多花一份 runner 时间。自测的 macOS 调用改为 `lint: false`。
