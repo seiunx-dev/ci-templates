@@ -197,7 +197,7 @@ jobs:
    git tag -fa v1 -m "v1 -> v1.2.3" v1.2.3^{}
    git push origin v1.2.3
    git push -f origin v1
-   gh release create v1.2.3 --notes-file <notes>
+   gh release create v1.2.3 --title v1.2.3 --notes-file <notes>
    ```
 3. 改了 `actions/` 下的 composite action 时：自测里模板引用的 action 是已发布的 `@v1`，看不到本次修改。先把 `v1` 移到新 commit，再在 main 上手动跑一次 `CI`（workflow_dispatch）确认，最后补打 `v1.x.y`。等合并触发的 push run 结束后再手动触发：同一 commit 的两个 run 同时跑时，各自重建并推 `:sha-<sha>`（digest 不同），自测的 docker 检查会失败。同一 commit 再跑一次是允许的：分支 tag 已经指向这个 commit 时 `docker-retag.yml` 不再移动，自测按"已持有"检查。
 
