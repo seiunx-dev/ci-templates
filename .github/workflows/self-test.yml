@@ -51,6 +51,8 @@ jobs:
         run: bash tests/docker_retag_test.sh
       - name: verify-version event / ref matrix (only a tag push publishes) and go / none sources
         run: bash tests/verify_version_test.sh
+      - name: maturin-wheels smoke-test guard and loose boolean comparisons
+        run: python3 tests/maturin_test_guard_test.py
 
   # rust-ci has two variants of each job: the plain one (no services:/container: keys) runs on
   # Windows/macOS; the services/container one only on Linux.
@@ -408,6 +410,34 @@ jobs:
           echo "highest glibc symbol version: $max"
           [ "$(printf '%s\n' "$max" GLIBC_2.17 | sort -V | tail -n1)" = GLIBC_2.17 ]
 
+  # maturin-wheels.yml is not run here (slow), but its smoke-test guard is: the same expression,
+  # evaluated by GitHub over targets that omit `test`, set it false and set it true. An omitted
+  # key is null, and null == false in GitHub expressions, so `matrix.t.test != false` skipped the
+  # smoke test whenever the key was left out. tests/maturin_test_guard_test.py checks that this
+  # job and maturin-wheels.yml use the same guard.
+  maturin-test-guard:
+    name: maturin-wheels test guard (${{ matrix.t.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        t:
+          - {label: omitted, expect: ran}
+          - {label: "false", test: false, expect: skipped}
+          - {label: "true", test: true, expect: ran}
+    steps:
+      - id: guard
+        if: toJSON(matrix.t.test) != 'false'
+        run: echo "result=ran" >> "$GITHUB_OUTPUT"
+      - name: Check the guard
+        env:
+          GOT: ${{ steps.guard.outputs.result || 'skipped' }}
+          WANT: ${{ matrix.t.expect }}
+          KEY: ${{ toJSON(matrix.t.test) }}
+        run: |
+          echo "test: $KEY -> $GOT"
+          [ "$GOT" = "$WANT" ] || { echo "::error::test: $KEY gave $GOT, want $WANT"; exit 1; }
+
   ci-ok:
     name: CI OK
     if: always()
@@ -434,6 +464,7 @@ jobs:
       - gate
       - rust-release
       - release-assets
+      - maturin-test-guard
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

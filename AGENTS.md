@@ -15,7 +15,7 @@
 | `.github/workflows/*.yml` | 可复用工作流（每个文件开头的注释说明用法），以及 `self-test.yml`（工作流名 `CI`） |
 | `actions/<name>/action.yml` | composite action：`setup-rust`、`apt-install`、`verify-version`、`wait-for-checks`、`package-archive`、`cargo-publish` |
 | `tools/check_callers.py` | 静态检查：YAML 语法、调用方 inputs/secrets 与声明是否一致、每个 job 有 `timeout-minutes`、第三方 action pin 到完整 SHA；也能检查别的仓库的调用文件 |
-| `tests/*_test.{py,sh}` | 从工作流 / action 文件里取出 `run:` 脚本直接运行的单元测试（`sonar.yml` 参数构建、`docker-retag.yml` 顺序保护、`verify-version`） |
+| `tests/*_test.{py,sh}` | 从工作流 / action 文件里取出 `run:` 脚本直接运行的单元测试（`sonar.yml` 参数构建、`docker-retag.yml` 顺序保护、`verify-version`），以及 `maturin_test_guard_test.py`（`maturin-wheels.yml` 的 `test` 条件；禁止表达式与裸 `true` / `false` 比较） |
 | `tests/fixtures/` | 自测用的最小 Rust / Python / Go / npm / bun / Docker 项目 |
 | `CHANGELOG.md` | 每个 `v1.x.y` 一节 |
 
@@ -26,6 +26,7 @@
 ```sh
 python3 tools/check_callers.py
 python3 tests/sonar_args_test.py
+python3 tests/maturin_test_guard_test.py
 bash tests/docker_retag_test.sh
 bash tests/verify_version_test.sh
 ```
@@ -37,6 +38,7 @@ actionlint + shellcheck 在 CI 里由 `actionlint.yml` 跑（版本见该文件�
 - **兼容性**：调用方都用 `@v1`，`v1` 移到新版本后立刻对所有仓库生效。新增 input 的默认值必须保持原行为；删除 / 改名 input、改默认行为、改构件名属于不兼容改动，要走 `v2`（见 README“版本策略”）。
 - **文档同步**：改了 input / output，要同步 README 的“Inputs 参考”表（它按 `workflow_call` / `action.yml` 声明整理，类型和默认值要与声明一致），必要时还有“目录”表和“约定”一节；发布时在 `CHANGELOG.md` 记一节。
 - **每个 job 都写 `timeout-minutes`**，第三方和官方 action 一律 pin 完整 commit SHA 并加 `# vX.Y.Z` 注释（timeout 和 SHA pin 由 `check_callers.py` 检查）。Dependabot（`.github/dependabot.yml`）每周一按组升级这些 pin，提交前缀 `[Chore] `。
+- 表达式里**不要和裸 `true` / `false` 比较**：缺省的 matrix key 或对象字段是 null，而 null == false，`x != false` 会把缺省当成 false。用 `toJSON(x) != 'false'` 这类字符串比较（`tests/maturin_test_guard_test.py` 会检查）。
 - 可复用工作流内部**不定义 `concurrency`**：被调用时 `github.workflow` 是调用方的名字，会和调用方的 group 撞上。
 - 模板内部引用 composite action 用的是 `seiunx-dev/ci-templates/actions/<name>@v1`，所以自测跑不到本次对 `actions/` 的修改，要按 README“发布本仓库”第 3 步先移 `v1` 再手动跑 `CI` 验证。
 - **加覆盖**：新行为尽量在 `self-test.yml` 里用 fixture 调一次，或者在 `tests/` 里加脚本测试，并把新 job 加进 `ci-ok` 的 `needs`。自测不跑 `gh-release.yml`、`maturin-wheels.yml`、`go-release.yml` 和 docker 的 promote 路径。

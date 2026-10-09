@@ -18,7 +18,8 @@
 #   target        maturin target (x86_64, aarch64, x86_64-apple-darwin, ...)  (required)
 #   manylinux     manylinux policy for Linux (default: inputs.manylinux)
 #   interpreters  per-target override of `interpreters` (e.g. "3.14t" on a manylinux 2_28 leg)
-#   test          false to skip the install/import smoke test (cross builds, no wheel for python-version)
+#   test          false to skip the install/import smoke test and test-command (cross builds,
+#                 no wheel for python-version); omitted or true = tested
 name: Maturin wheels
 
 on:
@@ -162,7 +163,7 @@ jobs:
           before-script-linux: ${{ steps.interp.outputs.before }}
           sccache: false
       - name: Smoke test
-        if: inputs.smoke-import != '' && matrix.t.test != false
+        if: inputs.smoke-import != '' && toJSON(matrix.t.test) != 'false'
         shell: bash
         working-directory: ${{ inputs.working-directory }}
         env:
@@ -172,7 +173,7 @@ jobs:
           python -m pip install --no-index --find-links dist --only-binary=:all: "$pkg"
           python -c "import $MODULE; print('$MODULE imported OK')"
       - name: Wheel tests
-        if: inputs.smoke-import != '' && inputs.test-command != '' && matrix.t.test != false
+        if: inputs.smoke-import != '' && inputs.test-command != '' && toJSON(matrix.t.test) != 'false'
         shell: bash
         working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.test-command }}
