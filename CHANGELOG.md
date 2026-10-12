@@ -2,6 +2,10 @@
 
 本仓库按 [版本策略](README.md#版本策略) 发布：`v1.x.y` 不可变，`v1` 跟随最新的 `v1.x.y`。
 
+## v1.1.10 — 2026-10-13
+
+- `actions/setup-rust`：`dtolnay/rust-toolchain` 的 pin 从 02cb101 升到 e2a55d2（上游 master，也是上游 `v1`）。上游改动：`toolchain` / `targets` / `components` 改为经 env 传入并加引号，不再直接插进 `run:` 行（dtolnay/rust-toolchain#187）；`rustup toolchain install` 遇到发布服务器正在更新导致的 checksum 失败时最多重试 4 次（dtolnay/rust-toolchain#186）。setup-rust 传入的三个 input 行为不变，调用方无需改动。（#14）
+
 ## v1.1.9 — 2026-10-09
 
 - `maturin-wheels.yml`：没写 `test` 的 target 现在会跑冒烟测试和 `test-command`。之前的条件是 `matrix.t.test != false`，而缺省的 key 是 null，GitHub 表达式里 null 和 false 比较相等（都转成 0），所以只有显式写了 `"test": true` 的 target 才测试，与文件头"false to skip"的约定相反（Team-Haruki/pjsekai-scores-rs 发现）。改为 `toJSON(matrix.t.test) != 'false'`，只有 `"test": false` 跳过。影响：seiunx-dev/cridecoder、seiunx-dev/unity-rs 的 wheel job 从这一版起真正安装并导入 wheel（unity-rs 还会跑 `test-command`）；显式写 `true` / `false` 的调用方不变。
