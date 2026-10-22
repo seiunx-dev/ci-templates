@@ -2,6 +2,12 @@
 
 本仓库按 [版本策略](README.md#版本策略) 发布：`v1.x.y` 不可变，`v1` 跟随最新的 `v1.x.y`。
 
+## v1.1.11 — 2026-10-23
+
+- `node-ci.yml` 新增 `e2e-system-deps`（默认 `always`，行为不变）：`when-missing` 时安装浏览器不带 `--with-deps`，按测试的方式启动一次各浏览器（`e2e-xvfb` 时在 xvfb 下有头启动），只给启动失败的浏览器（以及 chromium / firefox / webkit 以外的名字）跑 `playwright install-deps`。之前浏览器缓存命中时每次仍跑 `install-deps`：hosted runner 已经带了 Chromium 需要的库，apt 只是在装字体，而 Azure 镜像会在这些包上卡住（`Ign:`），Team-Haruki/Haruki-Toolbox 的 E2E job 12 分钟里有 9 分钟花在这一步。自测新增 `node-e2e` fixture，以 `when-missing` 跑 e2e job，系统依赖步骤约 2 秒。（#17）
+- e2e job 在任何 Playwright apt 之前写入 apt 配置：`Acquire::Retries 5`、HTTP(S) 超时 20 秒，镜像卡住时尽快换源重试，不再每个包等到默认超时；`e2e-system-deps` 不是这两个值时报错。（#17）
+- e2e job 改用项目自己的 `@playwright/test` CLI（`cli.js`），不再用 `npx playwright`，避免 npx 临时下载未锁定版本的包（Sonar `githubactions:S6505` / `S8543`）。（#17）
+
 ## v1.1.10 — 2026-10-13
 
 - `actions/setup-rust`：`dtolnay/rust-toolchain` 的 pin 从 02cb101 升到 e2a55d2（上游 master，也是上游 `v1`）。上游改动：`toolchain` / `targets` / `components` 改为经 env 传入并加引号，不再直接插进 `run:` 行（dtolnay/rust-toolchain#187）；`rustup toolchain install` 遇到发布服务器正在更新导致的 checksum 失败时最多重试 4 次（dtolnay/rust-toolchain#186）。setup-rust 传入的三个 input 行为不变，调用方无需改动。（#14）
