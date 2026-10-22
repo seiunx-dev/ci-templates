@@ -61,6 +61,10 @@ on:
         description: Wrap the e2e command in xvfb-run (headed WebGL tests).
         type: boolean
         default: false
+      e2e-system-deps:
+        description: "When to apt-install the browsers' system packages (fonts included): always (every run, as `playwright install --with-deps` / `install-deps`) or when-missing (only when a browser fails to launch; hosted runners already carry Chromium's libraries)."
+        type: string
+        default: always
       upload-build:
         description: Path of build output to upload as artifact `build` (retention 3 days). Empty = no upload.
         type: string
@@ -237,20 +241,50 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}-${{ inputs.e2e-browsers }}
+      - name: Apt timeouts
+        # a stalled mirror (archive.ubuntu.com / azure) holds each package for the default
+        # timeout before apt moves on; fail over sooner and retry instead
+        if: runner.os == 'Linux'
+        env:
+          DEPS: ${{ inputs.e2e-system-deps }}
+        run: |
+          case "$DEPS" in always|when-missing) ;; *) echo "::error::e2e-system-deps must be always or when-missing, got '$DEPS'"; exit 1 ;; esac
+          SUDO=""
+          if [ "$(id -u)" != 0 ]; then SUDO=sudo; fi
+          printf 'Acquire::Retries "5";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | $SUDO tee /etc/apt/apt.conf.d/80-ci-timeouts > /dev/null
       - name: Install browsers
         if: steps.pw-cache.outputs.cache-hit != 'true'
         env:
           BROWSERS: ${{ inputs.e2e-browsers }}
+          DEPS: ${{ inputs.e2e-system-deps }}
         run: |
           # shellcheck disable=SC2086
-          npx playwright install --with-deps $BROWSERS
+          if [ "$DEPS" = when-missing ]; then npx playwright install $BROWSERS; else npx playwright install --with-deps $BROWSERS; fi
       - name: Install browser system deps
-        if: steps.pw-cache.outputs.cache-hit == 'true'
+        if: steps.pw-cache.outputs.cache-hit == 'true' || inputs.e2e-system-deps == 'when-missing'
         env:
           BROWSERS: ${{ inputs.e2e-browsers }}
+          DEPS: ${{ inputs.e2e-system-deps }}
+          XVFB: ${{ inputs.e2e-xvfb }}
         run: |
+          # when-missing: launch each browser the way the tests will (headed under xvfb with
+          # e2e-xvfb); apt only for the ones that don't start. Other names (chrome, msedge …)
+          # always get their packages.
+          need=""
+          for b in $BROWSERS; do
+            if [ "$DEPS" = when-missing ]; then
+              case "$b" in
+                chromium|firefox|webkit)
+                  probe=(node -e "require('@playwright/test')[process.argv[1]].launch({ headless: process.env.XVFB !== 'true' }).then((x) => x.close()).catch((e) => { console.error(e.message.split('\\n')[0]); process.exit(1); })" "$b")
+                  if [ "$XVFB" = true ]; then probe=(xvfb-run --auto-servernum "${probe[@]}"); fi
+                  if timeout 120 "${probe[@]}"; then echo "$b launches: no system packages needed"; continue; fi ;;
+              esac
+            fi
+            need="$need $b"
+          done
+          if [ -z "$need" ]; then exit 0; fi
           # shellcheck disable=SC2086
-          npx playwright install-deps $BROWSERS
+          npx playwright install-deps $need
       - name: E2E prepare
         if: inputs.e2e-prepare-command != ''
         run: ${{ inputs.e2e-prepare-command }}

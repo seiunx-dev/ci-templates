@@ -134,6 +134,15 @@ jobs:
       working-directory: tests/fixtures/node-bun
       test-command: bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage
       coverage-path: coverage/lcov.info
+  # E2E with e2e-system-deps: when-missing: Chromium launches on the hosted runner, so the
+  # job runs Playwright without apt
+  node-e2e:
+    name: node-ci (e2e)
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      working-directory: tests/fixtures/node-e2e
+      e2e-command: npx playwright test
+      e2e-system-deps: when-missing
 
   # Pull requests only: the PR path builds without pushing. Two platforms exercise the QEMU
   # step; pr-paths exercises the changed-files filter; cache-backend: registry exercises the
@@ -452,6 +461,7 @@ jobs:
       - go
       - node-npm
       - node-bun
+      - node-e2e
       - docker
       - docker-push
       - docker-build-record
