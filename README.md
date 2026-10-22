@@ -356,6 +356,7 @@ Jobs：`Check`（按 lockfile 判断 bun/npm/pnpm，frozen 安装后跑 lint →
 | `e2e-prepare-command` | string | `''` | Shell run before the e2e command (e.g. a build the tests serve). |
 | `e2e-browsers` | string | `chromium` | Playwright browsers to install (space-separated). |
 | `e2e-xvfb` | boolean | `false` | Wrap the e2e command in xvfb-run (headed WebGL tests). |
+| `e2e-system-deps` | string | `always` | When to apt-install the browsers' system packages (fonts included): always (every run, as `playwright install --with-deps` / `install-deps`) or when-missing (only when a browser fails to launch; hosted runners already carry Chromium's libraries). |
 | `upload-build` | string | `''` | Path of build output to upload as artifact `build` (retention 3 days). Empty = no upload. |
 | `runs-on` | string | `ubuntu-latest` | Runner 标签。 |
 | `timeout-minutes` | number | `15` | job 超时（分钟）。 |
