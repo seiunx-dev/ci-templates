@@ -258,8 +258,10 @@ jobs:
           BROWSERS: ${{ inputs.e2e-browsers }}
           DEPS: ${{ inputs.e2e-system-deps }}
         run: |
+          # the project's own Playwright CLI (npx could fetch an unpinned one)
+          pw="$(node -p "require.resolve('@playwright/test/cli')")"
           # shellcheck disable=SC2086
-          if [ "$DEPS" = when-missing ]; then npx playwright install $BROWSERS; else npx playwright install --with-deps $BROWSERS; fi
+          if [ "$DEPS" = when-missing ]; then node "$pw" install $BROWSERS; else node "$pw" install --with-deps $BROWSERS; fi
       - name: Install browser system deps
         if: steps.pw-cache.outputs.cache-hit == 'true' || inputs.e2e-system-deps == 'when-missing'
         env:
@@ -284,7 +286,7 @@ jobs:
           done
           if [ -z "$need" ]; then exit 0; fi
           # shellcheck disable=SC2086
-          npx playwright install-deps $need
+          node "$(node -p "require.resolve('@playwright/test/cli')")" install-deps $need
       - name: E2E prepare
         if: inputs.e2e-prepare-command != ''
         run: ${{ inputs.e2e-prepare-command }}
