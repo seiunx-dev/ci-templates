@@ -14,7 +14,7 @@ Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-te
 | `.github/workflows/go-ci.yml` | gofmt、vet、staticcheck（带 `(compile)` 防护）、`go mod tidy -diff`、`test -race`（可同时出覆盖率并设阈值）、可选 bun 前端 |
 | `.github/workflows/python-uv-ci.yml` | ruff check / format、`uv sync --locked`、测试（可做 Python 版本矩阵）、可选 `uv build` |
 | `.github/workflows/node-ci.yml` | bun / npm / pnpm：lint、typecheck、test、build，外加带浏览器缓存的 Playwright e2e |
-| `.github/workflows/sonar.yml` | 只做扫描：下载 `coverage-*` 构件后扫描，按下载到的文件自动传 `-Dsonar.*.reportPaths`；忽略 `.github/workflows/**` 里的 githubactions:S7637（`@v1` 引用），并和仓库已有的 multicriteria 合并；拿不到 `SONAR_TOKEN`（Dependabot、fork PR）时直接跳过，不报红 |
+| `.github/workflows/sonar.yml` | 只做扫描：下载 `coverage-*` 构件后扫描，按下载到的文件自动传 `-Dsonar.*.reportPaths`；忽略 `.github/workflows/**` 里的 githubactions:S7637（`@v1` 引用），并和仓库已有的 multicriteria 合并；拿不到 `SONAR_TOKEN`（Dependabot、fork PR）时直接跳过，不报红；`cache: true` 时缓存 scanner 和 JRE / 插件 |
 | `.github/workflows/docker.yml` | buildx 构建并推送到 GHCR。PR 只构建不推送；main 推 `:sha-<完整 sha>`、`:sha-<7 位>`，`:main` 默认一起推，设 `defer-moving-tags: true` 时留给 `docker-retag.yml` 在 "CI OK" 之后再移；tag 可以把 main 构建的镜像直接重打 tag（promote），不重建 |
 | `.github/workflows/docker-retag.yml` | 把 `:main` 等移动 tag 指向已推送的 digest（`imagetools create`，不重建）；放在 `ci-ok` 之后，带新旧 commit 顺序保护 |
 | `.github/workflows/release-gate.yml` | 发布的第一步：检查 tag 与 manifest 中的版本一致，并等待被打 tag 的 commit 上 "CI OK" 变绿 |
@@ -26,7 +26,7 @@ Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-te
 | `.github/workflows/actionlint.yml` | actionlint + shellcheck 检查工作流 |
 | `.github/workflows/self-test.yml` | 本仓库自己的 CI（见“自测”） |
 | `actions/setup-rust` | 装工具链（优先级：input > rust-toolchain.toml > stable）并配置 rust-cache（只在默认分支保存缓存） |
-| `actions/apt-install` | apt 安装，带重试；在 runner 上用 sudo，在容器里不用 |
+| `actions/apt-install` | apt 安装，带重试和联网阶段超时（镜像卡住时杀掉重试）；在 runner 上用 sudo，在容器里不用 |
 | `actions/verify-version` | 从 tag 或 manifest 解析版本并校验两者一致 |
 | `actions/wait-for-checks` | 等待某个 commit 上的指定 check 完成并确认成功 |
 | `actions/package-archive` | 跨平台打包（Linux / macOS / Windows） |
@@ -35,6 +35,7 @@ Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-te
 | `tests/fixtures/` | 自测用的最小 Rust / Python / Go / npm / bun / Docker 项目 |
 | `tests/sonar_args_test.py` | `sonar.yml` 参数构建步骤的单元测试（直接取工作流里的脚本运行） |
 | `tests/docker_retag_test.sh` | `docker-retag.yml` 顺序保护的测试（取工作流里的脚本，桩掉 docker / gh） |
+| `tests/apt_install_test.sh` | `actions/apt-install` 重试和超时的测试（取 action 里的脚本，桩掉 apt-get；需要 GNU `timeout`） |
 | `tests/verify_version_test.sh` | `actions/verify-version` 的事件 / ref 组合测试（只有 tag push 时 `is-tag=true`），以及 `go` / `none` 版本来源 |
 | `tests/wait_for_checks_test.sh` | `actions/wait-for-checks` 的测试（取 action 里的脚本，桩掉 gh / sleep）：只有 `completed success` 放行；`timeout-minutes: 0` 只查一次 |
 
@@ -184,7 +185,7 @@ jobs:
 - **权限**：顶层 `contents: read`。只有需要写权限的 job 才提权：Docker job 给 `packages: write`（PR 上不推送；`cache-backend: registry` 时 PR 只登录读取 `:buildcache`），发布 job 给 `contents: write`，PyPI/npm 发布 job 给 `id-token: write`，gate job 给 `checks: read`。
 - **每个 job 都有 timeout-minutes**：检查类 15–20 分钟，覆盖率 30，Docker 45，Release 构建 45–60，发布 10。
 - **缓存只从默认分支写**：rust-cache 用 `save-if`；Go 用 restore/save 两段式（模块缓存按 go.sum 共用，构建缓存保存前裁剪，见 go-ci）；docker 的 `cache-to` 只在默认分支上设置，gha 缓存按镜像名分 scope，重型 Rust 镜像用 registry `:buildcache`。PR 和 tag 只读缓存。rust-release 默认 `cache: false`：tag 上写不了缓存；需要热缓存时设 `cache: true`，并在 main 上手动跑一次 Release（dry run）预热。
-- **构件保留期很短**：覆盖率 3 天，release 中间产物 1 天，docker build record 3 天。私有仓库的构件占账号的存储配额（配额满了，账号下所有 upload-artifact 都失败，Release 也发不出去），docker job 设 `build-record: false` 不上传 build record。
+- **构件保留期很短**：覆盖率 3 天，release 中间产物 1 天，docker build record 3 天。私有仓库的构件占账号的存储配额（配额满了，账号下所有 upload-artifact 都失败，Release 也发不出去），所以 docker 的 `build-record` 默认只在 public 仓库上传 build record，私有仓库默认不传（显式写 `true` / `false` 时以显式值为准）。
 - **版本号只写在 manifest 里**（Cargo.toml / pyproject / package.json），先提 bump PR，合并后再打 tag。gate 会拒绝 tag 与 manifest 不一致的发布。虚拟 workspace（根 Cargo.toml 没有版本）要设 `version-path` 或加 `[workspace.package] version`。
 - **测试只跑一遍**：开启 coverage 时，测试本身就在 llvm-cov / `-coverprofile` / coverage.py 下运行，结果上传为 `coverage-<lang>` 构件，由 `sonar.yml` 下载后扫描。`extra-test-command` 跑 `--ignored` 测试时一定带测试名过滤。
 - **服务**：`postgres-image` / `redis-image` 为空时服务不启动（GitHub 会跳过 `image: ''` 的服务容器）。测试通过 `CI_POSTGRES_URL` / `CI_REDIS_URL` 拿地址，用 `env:` 输入映射到项目自己的变量名（`MY_DSN=${CI_POSTGRES_URL}`）。容器模式（rust-ci `container:`）下主机名自动换成服务名。
@@ -212,11 +213,11 @@ jobs:
    git push -f origin v1
    gh release create v1.2.3 --title v1.2.3 --notes-file <notes>
    ```
-3. 改了 `actions/` 下的 composite action 时：自测里模板引用的 action 是已发布的 `@v1`，看不到本次修改。先把 `v1` 移到新 commit，再在 main 上手动跑一次 `CI`（workflow_dispatch）确认，最后补打 `v1.x.y`。等合并触发的 push run 结束后再手动触发：同一 commit 的两个 run 同时跑时，各自重建并推 `:sha-<sha>`（digest 不同），自测的 docker 检查会失败。同一 commit 再跑一次是允许的：分支 tag 已经指向这个 commit 时 `docker-retag.yml` 不再移动，自测按"已持有"检查。
+3. 改了 `actions/` 下的 composite action 时：自测里模板引用的 action 是已发布的 `@v1`，看不到本次修改。先把 `v1` 移到新 commit，再在 main 上手动跑一次 `CI`（workflow_dispatch）确认，最后补打 `v1.x.y`。等合并触发的 push run 结束后再手动触发：同一 commit 的两个 run 同时跑时，各自重建并推 `:sha-<sha>`（digest 不同），自测的 docker 检查会失败。同一 commit 再跑一次是允许的：分支 tag 已经指向这个 commit 时 `docker-retag.yml` 不再移动，自测按"已持有"检查。只改 Markdown / LICENSE 的 push（例如第 2 步的 CHANGELOG commit）不触发 `CI`，所以 `v1` 移到这样的 commit 时，这次手动运行是它唯一的一次 CI，不能省。
 
 ## 自测
 
-`self-test.yml`（工作流名 `CI`）在 push / PR / workflow_dispatch 时：
+`self-test.yml`（工作流名 `CI`）在 push / PR / workflow_dispatch 时运行（push main 时只改了 `**.md` / `LICENSE` 的 commit 不跑；PR 和 workflow_dispatch 不过滤路径，所以 `CI OK` 在每个 PR 上都会出结果）：
 
 - actionlint + shellcheck 检查所有工作流；`tools/check_callers.py` 解析所有 YAML 并检查本仓库内的调用；
 - 以 `./.github/workflows/x.yml` 调用本 commit 的模板，跑 `tests/fixtures/` 下的最小项目：
@@ -225,9 +226,9 @@ jobs:
   - 服务测试会真的连一次端口，并断言 `image: ''` 的那个服务没有启动；
   - sonar：不传 token，验证跳过路径是绿的；release-gate：dry run；
   - rust-release：cargo（linux/macOS/Windows）+ zigbuild（glibc 2.17），随后检查产物文件名、tar.gz/zip、dir/flat 布局、额外文件和 glibc 符号版本；
-  - docker：PR 上构建 amd64 + arm64（不推送；用 registry 缓存，覆盖只读登录和 pr-paths 过滤）；两个 docker job 都设 `build-record: false`，随后检查本次 run 没有 `.dockerbuild` 构件；push main 和 workflow_dispatch 时走 `defer-moving-tags` 推送路径，镜像是一次性的 `ghcr.io/seiunx-dev/ci-templates-selftest`：先检查 `:sha-*` 已推、分支 tag 没动，过一个替身 "CI OK" job，再用 `docker-retag.yml` 移分支 tag，最后检查分支 tag 指向同一个 digest（没有重建）；pages：只构建（`deploy: false`）。
+  - docker：PR 上构建 amd64 + arm64（不推送；用 registry 缓存，覆盖只读登录和 pr-paths 过滤）；PR 的 docker job 设 `build-record: false`、push 的 docker job 用默认值（本仓库 public，即上传），随后检查 PR run 没有、push / dispatch run 有 `.dockerbuild` 构件；push main 和 workflow_dispatch 时走 `defer-moving-tags` 推送路径，镜像是一次性的 `ghcr.io/seiunx-dev/ci-templates-selftest`：先检查 `:sha-*` 已推、分支 tag 没动，过一个替身 "CI OK" job，再用 `docker-retag.yml` 移分支 tag，最后检查分支 tag 指向同一个 digest（没有重建）；pages：只构建（`deploy: false`）。
   - sonar：`tests/sonar_args_test.py` 单元测试参数构建（multicriteria 合并、properties 语法、`project-version: auto`、report paths）。
-- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖；`verify-version` 的事件 / ref 组合（只有 tag push 发布）由 `tests/verify_version_test.sh` 覆盖；`wait-for-checks` 的放行条件（只有 `completed success`）和 `timeout-minutes: 0` 只查一次（只重试 API 错误，最多 3 次）由 `tests/wait_for_checks_test.sh` 用桩掉的 gh 覆盖。node-ci `e2e-paths` 的 diff（PR merge commit、多提交 push、各种照跑的情况）由 `tests/node_e2e_paths_test.sh` 在临时 git 仓库里覆盖，它也检查两个 E2E 变体的步骤相同。`maturin-wheels.yml` 冒烟测试的 `test` 条件由 `maturin-test-guard` job 在 GitHub 上对 `test` 缺省 / false / true 求值，`tests/maturin_test_guard_test.py` 检查两处用的是同一个表达式，并禁止表达式与裸 `true` / `false` 比较（缺省的 key 是 null，null == false）。
+- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖；`verify-version` 的事件 / ref 组合（只有 tag push 发布）由 `tests/verify_version_test.sh` 覆盖；`wait-for-checks` 的放行条件（只有 `completed success`）和 `timeout-minutes: 0` 只查一次（只重试 API 错误，最多 3 次）由 `tests/wait_for_checks_test.sh` 用桩掉的 gh 覆盖；`actions/apt-install` 的重试、网络阶段超时（卡住的 update / 下载被杀掉重试，解包不受限）由 `tests/apt_install_test.sh` 用桩掉的 apt-get 覆盖。node-ci `e2e-paths` 的 diff（PR merge commit、多提交 push、各种照跑的情况）由 `tests/node_e2e_paths_test.sh` 在临时 git 仓库里覆盖，它也检查两个 E2E 变体的步骤相同。`maturin-wheels.yml` 冒烟测试的 `test` 条件由 `maturin-test-guard` job 在 GitHub 上对 `test` 缺省 / false / true 求值，`tests/maturin_test_guard_test.py` 检查两处用的是同一个表达式，并禁止表达式与裸 `true` / `false` 比较（缺省的 key 是 null，null == false）。
 
 ## 迁移前检查
 
@@ -254,7 +255,7 @@ python3 tools/check_callers.py --callers DIR --clones CLONES_DIR
 
 - PyPI trusted publishing、npm provenance 不能在可复用工作流内部完成，发布 job 留在调用方。trusted publisher 绑定的是 **workflow 文件名**：发布从别的文件挪到 release.yml 的仓库，要在第一次打 tag 之前到 PyPI 为 release.yml（environment `pypi`）新增 trusted publisher。
 - `sonar.yml` 用命令行 `-Dsonar.issue.ignore.multicriteria=...` 加 S7637 的忽略，命令行会覆盖 sonar-project.properties 里的同名键，所以模板先读出 properties（或 `-Dproject.settings=` 指定的文件）和 `args` 里已有的 id 再追加 `ciTemplatesPins`。只在 SonarQube Cloud 网页上配置的 multicriteria 读不到，会被这次扫描的参数盖掉；这类规则要写进 sonar-project.properties。
-- `docker-retag.yml` 的顺序保护靠镜像的 `org.opencontainers.image.revision` label 和 compare API。两个 main run 几乎同时移同一个 tag 时，旧 commit 的 run 可能在新 run 写入前读到旧值、在它之后写入；所以每次写入后等 10 秒再检查一次（最多写 3 次），新 run 发现被旧 commit 覆盖会再写回去。没有用 concurrency group：它会取消排队中的 job。镜像没有 revision label、或 compare API 判断不了先后时，只在第一轮移动。
+- `docker-retag.yml` 的顺序保护靠镜像的 `org.opencontainers.image.revision` label 和 compare API。两个 main run 几乎同时移同一个 tag 时，旧 commit 的 run 可能在新 run 写入前读到旧值、在它之后写入；所以每次写入后等 `recheck-delay` 秒（默认 10）再检查一次（最多写 3 次，第 3 次写入后不再等），新 run 发现被旧 commit 覆盖会再写回去。这个等待要长于旧 run 从读 tag 到写 tag 的时间（一次 compare API 加一次 `imagetools create`，通常几秒）；main 上很少有两个 run 同时结束的仓库可以调小。没有用 concurrency group：它会取消排队中的 job。镜像没有 revision label、或 compare API 判断不了先后时，只在第一轮移动。
 - `docker.yml` 的 `latest: auto` 用 `git ls-remote` 找最高 semver tag；私有仓库匿名 ls-remote 会失败，此时回退为“稳定 tag 一律打 latest”。补打旧版本的 tag 时，私有仓库要显式传 `latest: false`。（自测在 public 仓库里，测不到这条路径。）
 - 已在 GitHub 上实测：`image: ''` 的服务容器会被跳过（日志："will not be started because the container definition has an empty image"），`container: ''` 的 job 直接跑在 runner 上。
 - 服务容器和 `container:` 只在 Linux runner 上可用。rust-ci 在没有服务和容器时走不带 `services:`/`container:` 的 job 变体，所以同一模板能跑 Windows/macOS；两个变体的步骤通过 YAML anchor 共用。
@@ -425,6 +426,7 @@ Job：`Scan`。只下载 `coverage-*` 构件并扫描；无 token 时绿色跳�
 | `args` | string | `''` | Extra scanner arguments (e.g. -Dsonar.qualitygate.wait=true). |
 | `report-paths` | boolean | `true` | Pass the report path of every downloaded coverage file (see header). |
 | `ignore-template-pins` | boolean | `true` | 忽略 `.github/workflows/**` 里的 githubactions:S7637（要求 full SHA pin），`@v1` 模板引用不再拉低 Security Rating；和仓库已有的 multicriteria 合并（见“已知限制”）。 |
+| `cache` | boolean | `false` | 用 actions/cache 缓存 scanner CLI（runner tool cache 下的 `sonar-scanner-cli`）和 `~/.sonar/cache`（SonarQube Cloud 下发的 JRE 和插件），每次扫描省去下载和校验（约 7–13 秒）。按 OS / 架构 / ISO 周一个条目，每周从新下载重建；只在默认分支写入，PR 只读。占仓库 10 GB Actions 缓存里几百 MB，语言缓存已经接近配额的仓库别开。 |
 | `timeout-minutes` | number | `15` | job 超时（分钟）。 |
 
 secrets: `SONAR_TOKEN`
@@ -453,7 +455,7 @@ Job：`Build and push`。调用方 job 权限：`contents: read`、`packages: wr
 | `cache-mode` | string | `min` | min \| max (max also caches intermediate stages, e.g. cargo-chef cook) |
 | `provenance` | string | `false` | build-push-action provenance (false keeps GHCR free of unknown/unknown manifests). |
 | `sbom` | string | `false` | build-push-action 的 sbom。 |
-| `build-record` | boolean | `true` | 上传 build record 构件（`<owner>~<repo>~<id>.dockerbuild`，保留 3 天）。私有仓库设 `false`：构件存储按账号计配额，配额满了之后整个账号所有工作流的 upload-artifact 都会失败。 |
+| `build-record` | boolean | public 仓库 `true`，私有仓库 `false`（`${{ !github.event.repository.private }}`） | 上传 build record 构件（`<owner>~<repo>~<id>.dockerbuild`，保留 3 天，只有 Docker Desktop 的构建历史会读）。私有仓库默认不传：构件存储按账号计配额，配额满了之后整个账号所有工作流的 upload-artifact 都会失败。显式传值时以显式值为准。 |
 | `artifact-name` | string | `''` | Same-run workflow artifact to download before the build (e.g. prebuilt binaries). Supports a glob pattern. |
 | `artifact-path` | string | `dist` | Where to put the downloaded artifact (relative to the repo root). |
 | `artifact-merge` | boolean | `true` | Merge multiple matching artifacts into artifact-path (false = one sub-directory per artifact). |
@@ -475,6 +477,7 @@ Job：`Move tags`。调用方 job 权限：`contents: read`、`packages: write`�
 | `tags` | string | 必填 | 每行一个 tag，完整引用（image:tag）或只写 tag 名。 |
 | `registry` | string | `''` | 登录的 registry。空 = `image` 的 host 部分。 |
 | `check-ancestry` | boolean | `true` | tag 已指向更新的 commit 构建的镜像时跳过。 |
+| `recheck-delay` | number | `10` | 写入后等多少秒再检查一次 tag（只在 `check-ancestry` 时；整数秒）。要长于并发的旧 commit run 从读 tag 到写 tag 的时间（见“已知限制”）。 |
 | `timeout-minutes` | number | `10` | job 超时（分钟）。 |
 
 outputs: `moved`（实际移动的 tag，每行一个）
@@ -614,6 +617,7 @@ Install Debian/Ubuntu packages with retries. Works on hosted runners (sudo) and 
 | input | 默认 | 说明 |
 |---|---|---|
 | `packages` | `''` | Space- or newline-separated package list. |
+| `attempt-timeout` | `180` | 每次尝试里两个联网阶段（`apt-get update`、下载软件包）各自的秒数上限，超时就杀掉并重试（共 3 次）；`0` = 不限。解包从已下载的文件进行，不受限（中断 dpkg 会留下半配置的系统）。每次 apt 调用还带 `Acquire::Retries 5` 和 HTTP(S) 超时 20 秒。 |
 
 ### `actions/cargo-publish` — Cargo publish
 

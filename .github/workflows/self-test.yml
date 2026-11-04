@@ -12,11 +12,20 @@
 # pass a stand-in "CI OK" job, move the tag with docker-retag.yml and check it again.
 # pages.yml builds with deploy: false. Not exercised: gh-release.yml (creates a release), maturin-wheels.yml (slow;
 # covered by the first pilot repo), go-release.yml (needs go.mod at the repository root).
+#
+# A push to main that changes only Markdown files or LICENSE (a changelog entry, README) does not
+# run: nothing here reads them. Pull requests and workflow_dispatch always run, so the required
+# "CI OK" check still reports on every PR, and the manual run after moving v1 (README,
+# "发布本仓库", step 3) is unaffected; it is the only run of such a docs-only release commit.
 name: CI
 
 on:
   push:
     branches: [main]
+    # push only: on pull_request a skipped workflow would leave the required "CI OK" pending
+    paths-ignore:
+      - "**.md"
+      - LICENSE
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -49,6 +58,8 @@ jobs:
         run: python3 tests/sonar_args_test.py
       - name: docker-retag.yml ordering guard against stubbed docker / gh
         run: bash tests/docker_retag_test.sh
+      - name: apt-install retries and attempt timeout against a stubbed apt-get
+        run: bash tests/apt_install_test.sh
       - name: verify-version event / ref matrix (only a tag push publishes) and go / none sources
         run: bash tests/verify_version_test.sh
       - name: wait-for-checks only passes a succeeded check; timeout-minutes 0 looks once
@@ -224,6 +235,7 @@ jobs:
         .github/workflows/self-test.yml
 
   # Push path with deferred moving tags (never on PRs: PRs do not push). Throwaway image only.
+  # build-record is left at its default (true here: this repository is public).
   docker-push:
     name: docker (push, deferred tags)
     if: github.event_name != 'pull_request'
@@ -237,13 +249,13 @@ jobs:
       context: tests/fixtures/docker
       version-build-arg: APP_VERSION
       cache-backend: registry
-      build-record: false
       defer-moving-tags: true
 
-  # Both docker jobs above set build-record: false, so this run must not carry a .dockerbuild
-  # artifact (build-push-action uploads one per build by default).
+  # The PR docker job sets build-record: false, so a PR run must not carry a .dockerbuild
+  # artifact. docker-push keeps the default, which is true in a public repository (false in a
+  # private one), so a push / dispatch run must carry one.
   docker-build-record:
-    name: docker (no build record artifact)
+    name: docker (build record artifact)
     needs: [docker, docker-push]
     if: ${{ !cancelled() && (needs.docker.result == 'success' || needs.docker-push.result == 'success') }}
     runs-on: ubuntu-latest
@@ -254,12 +266,14 @@ jobs:
       - name: Check the run's artifacts
         env:
           GH_TOKEN: ${{ github.token }}
+          PRIVATE: ${{ github.event.repository.private }}
         run: |
           names=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].name')
           printf 'artifacts so far:\n%s\n' "$names"
-          if grep -q '[.]dockerbuild$' <<< "$names"; then
-            echo "::error::a docker job with build-record: false uploaded a build record"; exit 1
-          fi
+          if grep -q '[.]dockerbuild$' <<< "$names"; then got=yes; else got=no; fi
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] || [ "$PRIVATE" = true ]; then want=no; else want=yes; fi
+          echo "build record: got $got, want $want (event $GITHUB_EVENT_NAME, private: $PRIVATE)"
+          [ "$got" = "$want" ] || { echo "::error::build record artifact: got $got, want $want"; exit 1; }
 
   docker-before:
     name: docker (sha tags pushed, moving tag not yet)
@@ -391,11 +405,14 @@ jobs:
       output-dir: dist
       deploy: false
 
-  # No SONAR_TOKEN is passed: the scan must skip and stay green.
+  # No SONAR_TOKEN is passed: the scan (and, with cache: true, the cache steps) must skip and
+  # stay green.
   sonar:
     name: Sonar (skip path)
     needs: [rust-services, go, node-bun]
     uses: ./.github/workflows/sonar.yml
+    with:
+      cache: true
 
   gate:
     name: Release gate (dry run)

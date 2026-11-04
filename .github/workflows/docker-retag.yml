@@ -7,9 +7,12 @@
 # Ordering guard: runs of consecutive commits finish in any order. Before moving a tag, the
 # commit recorded in the image it currently points to (label org.opencontainers.image.revision,
 # set by docker.yml) is compared with this run's commit through the GitHub compare API; when
-# the tag already holds a newer commit, it is left alone. After writing, the job waits 10 s and
-# checks again (up to three writes), so a run of an older commit that read the tag just before
-# this write and wrote just after it is corrected. Disable with `check-ancestry: false`.
+# the tag already holds a newer commit, it is left alone. After writing, the job waits
+# `recheck-delay` seconds (10 by default) and checks again (up to three writes), so a run of an
+# older commit that read the tag just before this write and wrote just after it is corrected.
+# The delay must exceed the time such a run takes from reading the tag to writing it (one
+# compare API call plus one `imagetools create`, a few seconds). Disable with
+# `check-ancestry: false`.
 #
 # Caller example (ci.yml):
 #   docker-tags:
@@ -52,6 +55,13 @@ on:
         description: Skip a tag that already points to an image built from a newer commit.
         type: boolean
         default: true
+      recheck-delay:
+        description: >-
+          Seconds to wait after a write before checking the tag again (check-ancestry only). It has
+          to exceed the read-to-write time of a concurrent run of an older commit (a compare API
+          call plus an imagetools create); lower it only when such runs are rare or that is fast.
+        type: number
+        default: 10
       timeout-minutes:
         type: number
         default: 10
@@ -97,8 +107,10 @@ jobs:
           DIGEST: ${{ inputs.digest }}
           TAGS: ${{ inputs.tags }}
           CHECK: ${{ inputs.check-ancestry }}
+          DELAY: ${{ inputs.recheck-delay }}
         run: |
           set -euo pipefail
+          [[ "$DELAY" =~ ^[0-9]+$ ]] || { echo "::error::recheck-delay must be a whole number of seconds, got '$DELAY'"; exit 1; }
           if [ -n "$DIGEST" ]; then src="$IMAGE@$DIGEST"; else src="$IMAGE:sha-$GITHUB_SHA"; fi
           if ! docker buildx imagetools inspect "$src" > /dev/null; then
             echo "::error::$src does not exist; nothing to tag"; exit 1
@@ -165,6 +177,8 @@ jobs:
             docker buildx imagetools create --prefer-index=false "${args[@]}" "$src"
             echo "Moved to $src:"; for ((i = 1; i < ${#args[@]}; i += 2)); do echo "  ${args[i]}"; done
             [ "$CHECK" = true ] || break
-            sleep 10
+            # the third write is final: no check follows it, so do not wait for one
+            [ "$pass" != 3 ] || break
+            sleep "$DELAY"
           done
           { echo "moved<<__EOF__"; printf '%s' "$moved"; echo "__EOF__"; } >> "$GITHUB_OUTPUT"
