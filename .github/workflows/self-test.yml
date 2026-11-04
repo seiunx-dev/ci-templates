@@ -53,6 +53,12 @@ jobs:
         run: bash tests/verify_version_test.sh
       - name: maturin-wheels smoke-test guard and loose boolean comparisons
         run: python3 tests/maturin_test_guard_test.py
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tests/fixtures/go-min/go.mod
+          cache: false
+      - name: go-ci build-cache trim and coverage merge against a real Go toolchain
+        run: bash tests/go_cache_test.sh
 
   # rust-ci has two variants of each job: the plain one (no services:/container: keys) runs on
   # Windows/macOS; the services/container one only on Linux.

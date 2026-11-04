@@ -170,7 +170,7 @@ jobs:
 - **concurrency**：PR 用 `${workflow}-pr-<PR号>` 并 cancel-in-progress；其他事件用 `${workflow}-<事件>-<sha>`，每个 commit 一组。不能用 `ref` 分组：同组里排队中的 run 会被更新的 run 顶掉（即使 cancel-in-progress 是 false），连续 push 三次时中间那个 commit 就没有 "CI OK" 和 `:sha-<sha>` 镜像，给它打 tag 会让 gate 失败。Release 用 `release-${ref}`，从不取消。可复用工作流内部不定义 concurrency：被调用的工作流里 `github.workflow` 取到的是调用方的名字，自己再定义会和调用方的 group 撞上导致死锁。
 - **权限**：顶层 `contents: read`。只有需要写权限的 job 才提权：Docker job 给 `packages: write`（PR 上不推送；`cache-backend: registry` 时 PR 只登录读取 `:buildcache`），发布 job 给 `contents: write`，PyPI/npm 发布 job 给 `id-token: write`，gate job 给 `checks: read`。
 - **每个 job 都有 timeout-minutes**：检查类 15–20 分钟，覆盖率 30，Docker 45，Release 构建 45–60，发布 10。
-- **缓存只从默认分支写**：rust-cache 用 `save-if`；Go 用 restore/save 两段式；docker 的 `cache-to` 只在默认分支上设置，gha 缓存按镜像名分 scope，重型 Rust 镜像用 registry `:buildcache`。PR 和 tag 只读缓存。rust-release 默认 `cache: false`：tag 上写不了缓存；需要热缓存时设 `cache: true`，并在 main 上手动跑一次 Release（dry run）预热。
+- **缓存只从默认分支写**：rust-cache 用 `save-if`；Go 用 restore/save 两段式（模块缓存按 go.sum 共用，构建缓存保存前裁剪，见 go-ci）；docker 的 `cache-to` 只在默认分支上设置，gha 缓存按镜像名分 scope，重型 Rust 镜像用 registry `:buildcache`。PR 和 tag 只读缓存。rust-release 默认 `cache: false`：tag 上写不了缓存；需要热缓存时设 `cache: true`，并在 main 上手动跑一次 Release（dry run）预热。
 - **构件保留期很短**：覆盖率 3 天，release 中间产物 1 天，docker build record 3 天。私有仓库的构件占账号的存储配额（配额满了，账号下所有 upload-artifact 都失败，Release 也发不出去），docker job 设 `build-record: false` 不上传 build record。
 - **版本号只写在 manifest 里**（Cargo.toml / pyproject / package.json），先提 bump PR，合并后再打 tag。gate 会拒绝 tag 与 manifest 不一致的发布。虚拟 workspace（根 Cargo.toml 没有版本）要设 `version-path` 或加 `[workspace.package] version`。
 - **测试只跑一遍**：开启 coverage 时，测试本身就在 llvm-cov / `-coverprofile` / coverage.py 下运行，结果上传为 `coverage-<lang>` 构件，由 `sonar.yml` 下载后扫描。`extra-test-command` 跑 `--ignored` 测试时一定带测试名过滤。
@@ -208,7 +208,7 @@ jobs:
 - actionlint + shellcheck 检查所有工作流；`tools/check_callers.py` 解析所有 YAML 并检查本仓库内的调用；
 - 以 `./.github/workflows/x.yml` 调用本 commit 的模板，跑 `tests/fixtures/` 下的最小项目：
   - rust-ci：Windows、macOS、Linux + Postgres + coverage + MSRV、Debian 容器 + Redis（服务通过服务名访问）；
-  - python-uv-ci：3.12/3.13 矩阵 + Redis + `uv build`；go-ci：Postgres + 覆盖率阈值；node-ci：npm、bun + 覆盖率；
+  - python-uv-ci：3.12/3.13 矩阵 + Redis + `uv build`；go-ci：Postgres + 覆盖率阈值（构建缓存的裁剪和 `-coverpkg` 覆盖率合并由 `tests/go_cache_test.sh` 用真实 Go 工具链覆盖，自测的 go job 只在 push main 时走保存 / 裁剪路径）；node-ci：npm、bun + 覆盖率；
   - 服务测试会真的连一次端口，并断言 `image: ''` 的那个服务没有启动；
   - sonar：不传 token，验证跳过路径是绿的；release-gate：dry run；
   - rust-release：cargo（linux/macOS/Windows）+ zigbuild（glibc 2.17），随后检查产物文件名、tar.gz/zip、dir/flat 布局、额外文件和 glibc 符号版本；
@@ -286,6 +286,12 @@ Jobs：`Lint`（fmt + 每个 feature set 跑 clippy `-D warnings`；`lint: false
 ### `go-ci.yml` — Go CI
 
 Jobs：`Lint`（gofmt、`go mod tidy -diff`、build、vet、staticcheck、可选 govulncheck）、`Test`（`go test -race`，可同时出 `coverage/go.out` 并设阈值，上传 `coverage-go`）、可选 `Frontend`（bun）。Go 版本取自 go.mod：有 `toolchain` 行时用它，否则用 `go` 行；装好后 `GOTOOLCHAIN=local`（不会自动下载别的版本）。
+
+缓存（只在默认分支保存，PR 和 tag 只读；exact hit（重跑）不保存）：
+
+- **模块缓存**（`GOMODCACHE`）：key 只取 go.sum 的 hash（`go-mod-<os>-<hash>`），Lint 和 Test 共用，由 Lint 在 exact key 未命中时保存。默认分支上未命中时不用旧 go.sum 的条目兜底，从空目录开始下载，所以条目里只有当前 go.sum 的模块版本；PR 上仍按前缀回退到最近的条目。
+- **构建缓存**（`GOCACHE`，Lint 另含 staticcheck 自己的缓存 `~/.cache/staticcheck`）：按 job、调用方工作流文件和 `working-directory` 分开，每个 commit 一个 key，go.sum 前缀作 restore key。保存前删掉本次没用到的条目：恢复后先把所有条目的 mtime 设为两小时前并打标记（Go 和 staticcheck 只在条目超过一小时没更新时才在使用时刷新 mtime），保存前删除不比标记新的条目，但保留本次保留下来的 action 条目指向的输出。每个条目只是一次构建的工作集，不再随 commit 累积。
+- `coverpkg-exclude` 非空（即使用 `-coverpkg`）时，`coverage/go.out` 里同一个块会按被测包的个数重复出现；Test 会把重复的块合成一行（atomic / count 模式下计数相加，set 模式取或），`go tool cover` 读取时本来就这样合并，Sonar 只看行上是否有计数 > 0 的块，所以两边的覆盖率不变，构件只是变小。遇到无法识别的行时保持原文件并给出 warning。
 
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|
