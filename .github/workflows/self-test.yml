@@ -103,6 +103,22 @@ jobs:
       apt-packages: pkg-config
       cache-key-prefix: selftest-ctr
       extra-test-command: $CARGO_TEST --locked -- --ignored service_redis_reachable
+  # Private-repo options: lint and actionlint inside the Test job ("Lint and test"), and
+  # debuginfo exported to the tests. The marker proves lint ran in the same job before the tests.
+  rust-combined:
+    name: rust-ci combined + actionlint + debuginfo
+    uses: ./.github/workflows/rust-ci.yml
+    with:
+      working-directory: tests/fixtures/rust-min
+      combined: true
+      actionlint: true
+      debuginfo: line-tables-only
+      cache-key-prefix: selftest-comb
+      extra-lint-command: touch "$RUNNER_TEMP/combined-lint-ran"
+      extra-test-command: >-
+        test -f "$RUNNER_TEMP/combined-lint-ran"
+        && test "$CARGO_PROFILE_TEST_DEBUG" = line-tables-only
+        && test "$CARGO_PROFILE_DEV_DEBUG" = line-tables-only
 
   # Redis only (empty postgres-image must be skipped), a Python matrix and uv build.
   python:
@@ -116,6 +132,16 @@ jobs:
         EXPECT_REDIS=1
         EXPECT_NO_POSTGRES=1
       build-dist: true
+  # Lint (ruff + lint-command) and actionlint in the first test leg only; no Lint job.
+  python-combined:
+    name: python-uv-ci combined + actionlint
+    uses: ./.github/workflows/python-uv-ci.yml
+    with:
+      working-directory: tests/fixtures/py-min
+      python-versions: '["3.12", "3.13"]'
+      combined: true
+      actionlint: true
+      lint-command: uv run python -c "import py_min"
 
   # Postgres only (empty redis-image must be skipped), coverage + threshold.
   go:
@@ -485,7 +511,9 @@ jobs:
       - rust-macos
       - rust-services
       - rust-container
+      - rust-combined
       - python
+      - python-combined
       - go
       - node-npm
       - node-bun

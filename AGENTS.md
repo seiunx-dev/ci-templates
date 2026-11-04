@@ -33,7 +33,7 @@ bash tests/node_e2e_paths_test.sh
 bash tests/go_cache_test.sh   # 需要 Go（自测里由 setup-go 按 go-min fixture 安装）
 ```
 
-actionlint + shellcheck 在 CI 里由 `actionlint.yml` 跑（版本见该文件的 `actionlint-version` 默认值）。各模板在 fixture 上的实际运行只能在 GitHub 上看。
+actionlint + shellcheck 在 CI 里由 `actionlint.yml` 跑（版本见该文件的 `actionlint-version` 默认值）。`rust-ci.yml` / `python-uv-ci.yml` 的 `actionlint: true` 用同一套安装脚本、同名 input，升级 actionlint 时三处的 `actionlint-version` 默认值和 README 一起改。各模板在 fixture 上的实际运行只能在 GitHub 上看。
 
 ## 改模板时
 
@@ -41,6 +41,7 @@ actionlint + shellcheck 在 CI 里由 `actionlint.yml` 跑（版本见该文件�
 - **文档同步**：改了 input / output，要同步 README 的“Inputs 参考”表（它按 `workflow_call` / `action.yml` 声明整理，类型和默认值要与声明一致），必要时还有“目录”表和“约定”一节；发布时在 `CHANGELOG.md` 记一节。
 - **每个 job 都写 `timeout-minutes`**，第三方和官方 action 一律 pin 完整 commit SHA 并加 `# vX.Y.Z` 注释（timeout 和 SHA pin 由 `check_callers.py` 检查）。Dependabot（`.github/dependabot.yml`）每周一按组升级这些 pin，提交前缀 `[Chore] `。
 - 表达式里**不要和裸 `true` / `false` 比较**：缺省的 matrix key 或对象字段是 null，而 null == false，`x != false` 会把缺省当成 false。用 `toJSON(x) != 'false'` 这类字符串比较（`tests/maturin_test_guard_test.py` 会检查）。
+- **私有调用方按 job 计费**（每个 job 向上取整到分钟）：省 job 的选项（`combined`、`actionlint`）一律 opt-in、默认不改 job 结构和 job 名；rust-ci / python-uv-ci 里 Lint 和 Test 共用的步骤通过 YAML alias 复用，是否执行由 job 级 env（`RUST_CI_LINT` / `PYTHON_CI_LINT` 等）决定，改这些步骤时两个 job 同时生效。
 - 可复用工作流内部**不定义 `concurrency`**：被调用时 `github.workflow` 是调用方的名字，会和调用方的 group 撞上。
 - 模板内部引用 composite action 用的是 `seiunx-dev/ci-templates/actions/<name>@v1`，所以自测跑不到本次对 `actions/` 的修改，要按 README“发布本仓库”第 3 步先移 `v1` 再手动跑 `CI` 验证。
 - **加覆盖**：新行为尽量在 `self-test.yml` 里用 fixture 调一次，或者在 `tests/` 里加脚本测试，并把新 job 加进 `ci-ok` 的 `needs`。自测不跑 `gh-release.yml`、`maturin-wheels.yml`、`go-release.yml` 和 docker 的 promote 路径。

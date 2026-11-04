@@ -207,8 +207,8 @@ jobs:
 
 - actionlint + shellcheck 检查所有工作流；`tools/check_callers.py` 解析所有 YAML 并检查本仓库内的调用；
 - 以 `./.github/workflows/x.yml` 调用本 commit 的模板，跑 `tests/fixtures/` 下的最小项目：
-  - rust-ci：Windows、macOS、Linux + Postgres + coverage + MSRV、Debian 容器 + Redis（服务通过服务名访问）；
-  - python-uv-ci：3.12/3.13 矩阵 + Redis + `uv build`；go-ci：Postgres + 覆盖率阈值（构建缓存的裁剪和 `-coverpkg` 覆盖率合并由 `tests/go_cache_test.sh` 用真实 Go 工具链覆盖，自测的 go job 只在 push main 时走保存 / 裁剪路径）；node-ci：npm、bun + 覆盖率、e2e（等 Check 的 `E2E` 和带 `e2e-events` / `e2e-paths` / npm fetch 参数的 `E2E (parallel)`，后者也走 `npm-audit: false` 的 `npm ci`）；
+  - rust-ci：Windows、macOS、Linux + Postgres + coverage + MSRV、Debian 容器 + Redis（服务通过服务名访问）、`combined` + `actionlint` + `debuginfo`（测试检查 lint 已在同一 job 里跑过、debuginfo 变量已导出）；
+  - python-uv-ci：3.12/3.13 矩阵 + Redis + `uv build`；`combined` + `actionlint`（lint 只在第一个 leg）；go-ci：Postgres + 覆盖率阈值（构建缓存的裁剪和 `-coverpkg` 覆盖率合并由 `tests/go_cache_test.sh` 用真实 Go 工具链覆盖，自测的 go job 只在 push main 时走保存 / 裁剪路径）；node-ci：npm、bun + 覆盖率、e2e（等 Check 的 `E2E` 和带 `e2e-events` / `e2e-paths` / npm fetch 参数的 `E2E (parallel)`，后者也走 `npm-audit: false` 的 `npm ci`）；
   - 服务测试会真的连一次端口，并断言 `image: ''` 的那个服务没有启动；
   - sonar：不传 token，验证跳过路径是绿的；release-gate：dry run；
   - rust-release：cargo（linux/macOS/Windows）+ zigbuild（glibc 2.17），随后检查产物文件名、tar.gz/zip、dir/flat 布局、额外文件和 glibc 符号版本；
@@ -235,6 +235,8 @@ python3 tools/check_callers.py --callers DIR --clones CLONES_DIR
     uses: seiunx-dev/ci-templates/.github/workflows/actionlint.yml@v1
 ```
 
+私有仓库已经调用 `rust-ci.yml` 或 `python-uv-ci.yml` 时，改用它们的 `actionlint: true`，省掉这个按整分钟计费的单独 job（记得从 `ci-ok` 的 `needs` 里去掉 `lint`）。
+
 ## 已知限制
 
 - PyPI trusted publishing、npm provenance 不能在可复用工作流内部完成，发布 job 留在调用方。trusted publisher 绑定的是 **workflow 文件名**：发布从别的文件挪到 release.yml 的仓库，要在第一次打 tag 之前到 PyPI 为 release.yml（environment `pypi`）新增 trusted publisher。
@@ -251,6 +253,14 @@ python3 tools/check_callers.py --callers DIR --clones CLONES_DIR
 ### `rust-ci.yml` — Rust CI
 
 Jobs：`Lint`（fmt + 每个 feature set 跑 clippy `-D warnings`；`lint: false` 时不跑）、`Test`（cargo test 或 cargo-llvm-cov，上传 `coverage-<cache-key-prefix>`）、可选 `MSRV`。设了 `postgres-image` / `redis-image` / `container` 时走带 `services:`/`container:` 的变体（仅 Linux）。
+
+私有仓库省分钟（都是 opt-in，默认行为不变）：私有仓库每个 job 按整分钟向上取整计费，10 秒的 job 也算 1 分钟。
+
+- `combined: true`：不单独跑 `Lint`，fmt / clippy / `extra-lint-command` 在 Test job 里、测试之前运行，job 名变成 `Lint and test`（check 名如 `Rust / Lint and test`）。省一次 checkout、工具链安装、缓存恢复和一个取整分钟，代价是 lint 和测试不再并行（wall time 约多 lint 那段）。超时用 `test-timeout-minutes`；rust-cache key 是 `<cache-key-prefix>-combined-test`（coverage 时 `-combined-coverage`），第一次是冷缓存。`lint: false` 时 `combined` 不起作用。
+- `actionlint: true`：在做 lint 的那个 job 里（`Lint`；`combined: true` 或 `lint: false` 时是 Test job）checkout 之后跑 actionlint（版本 `actionlint-version`，与 `actionlint.yml` 同样下载并校验 checksum），替代单独调用 `actionlint.yml`。只支持 Linux / macOS runner；shellcheck 不在 PATH 上时（如 `container` 模式）只给 warning、不检查 `run:` 脚本，要检查就把 `shellcheck` 加进 `apt-packages`。另一个 OS 的 `lint: false` 调用不要再开它，否则会跑两遍。
+- `debuginfo: line-tables-only`：Test job 里导出 `CARGO_PROFILE_DEV_DEBUG` / `CARGO_PROFILE_TEST_DEBUG`，测试构建只带行号表（panic / backtrace 仍有文件和行号，丢变量信息），大 crate 的编译和链接更快。只影响 Test job，不影响 Lint、MSRV 和 release 构建；`env` 里同名变量优先。值变了 rust-cache key 也会变，第一次是冷缓存。
+
+调用方 required check 只有 `CI OK` 时，这些选项改掉的 check 名（`Rust / Lint`、`Workflow lint / actionlint`）不影响合并。
 
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -280,6 +290,10 @@ Jobs：`Lint`（fmt + 每个 feature set 跑 clippy `-D warnings`；`lint: false
 | `env` | string | `''` | KEY=VALUE lines exported to both jobs. ${CI_POSTGRES_URL} and ${CI_REDIS_URL} are substituted with the service URLs. |
 | `cache-key-prefix` | string | `rust` | Prefix for rust-cache keys and the coverage artifact name. Change it when one repo calls rust-ci more than once. |
 | `runs-on` | string | `ubuntu-latest` | Runner label. |
+| `combined` | boolean | `false` | Run fmt, clippy and extra-lint-command at the start of the Test job (named "Lint and test") instead of a separate Lint job. Saves one job (checkout, toolchain, cache restore and the per-job minute rounding of private repos) at the cost of lint/test parallelism. The job uses test-timeout-minutes and the rust-cache key <cache-key-prefix>-combined-test (or -combined-coverage). |
+| `actionlint` | boolean | `false` | Run actionlint (+ shellcheck when it is on PATH) on the repository's workflows as a step of the job that lints: Lint, or the Test job when combined is true or lint is false. Replaces a separate actionlint.yml job. Linux and macOS runners only. |
+| `actionlint-version` | string | `1.7.12` | actionlint release used when actionlint is true (same default as actionlint.yml). |
+| `debuginfo` | string | `''` | Debuginfo level for test builds, exported as CARGO_PROFILE_DEV_DEBUG and CARGO_PROFILE_TEST_DEBUG in the Test job (e.g. line-tables-only: panics and backtraces keep file:line, compile and link get faster). Empty = the project's profile settings. Variables in `env` override it. |
 | `lint-timeout-minutes` | number | `20` | lint / MSRV job 的超时（分钟）。 |
 | `test-timeout-minutes` | number | `30` | test job 的超时（分钟）。 |
 
@@ -322,6 +336,8 @@ Jobs：`Lint`（gofmt、`go mod tidy -diff`、build、vet、staticcheck、可选
 
 Jobs：`Lint`（ruff check/format；项目锁了 ruff 就用项目的，否则 `uvx ruff`；可选额外 lint；可选 `uv build` 上传 `dist`）、`Test <python>`（`uv sync`，跑 `test-command`，可选上传 `coverage-python`）。
 
+私有仓库省分钟（opt-in）：`combined: true` 不单独跑 `Lint`，ruff / `lint-command` 在第一个测试 leg（`python-versions` 的第一项）`uv sync` 之后运行，`build-dist` 在该 leg 测试之后运行；`lint-command` 因此能看到测试 job 的 `env`、服务和下载的构件。`test-command` 为空时没有测试 job，`Lint` 照常跑。`actionlint: true` 在做 lint 的 job 里跑 actionlint（同 rust-ci，仅 Linux / macOS），替代单独的 `actionlint.yml` job。
+
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `working-directory` | string | `.` | 项目目录（相对仓库根）。 |
@@ -339,6 +355,9 @@ Jobs：`Lint`（ruff check/format；项目锁了 ruff 就用项目的，否则 `
 | `redis-image` | string | `''` | Redis 服务镜像（如 redis:7-alpine），空 = 不启动。测试拿到 CI_REDIS_URL。 |
 | `env` | string | `''` | KEY=VALUE lines. ${CI_POSTGRES_URL} / ${CI_REDIS_URL} are substituted. |
 | `build-dist` | boolean | `false` | Run `uv build` and upload dist/ as artifact `dist` (retention 3 days). |
+| `combined` | boolean | `false` | Run ruff, lint-command and build-dist in the first test leg (the first python-versions entry, after uv sync) instead of a separate Lint job. Saves one job; lint-command then sees the test job's env, services and downloaded artifact. Ignored when test-command is empty (the Lint job runs as usual). |
+| `actionlint` | boolean | `false` | Run actionlint (+ shellcheck) on the repository's workflows as a step of the job that lints (Lint, or the first test leg when combined is true) instead of a separate actionlint.yml job. Linux and macOS runners only. |
+| `actionlint-version` | string | `1.7.12` | actionlint release used when actionlint is true (same default as actionlint.yml). |
 | `runs-on` | string | `ubuntu-latest` | Runner 标签。 |
 | `timeout-minutes` | number | `20` | job 超时（分钟）。 |
 
