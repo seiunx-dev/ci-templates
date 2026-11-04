@@ -2,6 +2,11 @@
 # lockfile, then lint, typecheck, unit tests, build) and an optional Playwright `e2e`
 # job with a cached browser download.
 #
+# E2E runs after `check` passes by default. `e2e-needs-check: false` starts it in parallel
+# (shorter wall time; it then also runs when check fails). `e2e-events` limits it to some
+# events (e.g. `pull_request`), and `e2e-paths` skips its steps when no matching file changed
+# (a git diff inside the job; no extra job).
+#
 # Each command input accepts `auto` (run `<pm> run <script>` when package.json has that
 # script), an explicit command, or '' to skip.
 name: Node CI
@@ -78,6 +83,30 @@ on:
       e2e-timeout-minutes:
         type: number
         default: 20
+      e2e-needs-check:
+        description: "true: E2E starts after Check passes. false: E2E runs in parallel with Check (it then also runs when Check fails)."
+        type: boolean
+        default: true
+      e2e-events:
+        description: "Space-separated event names E2E runs on (e.g. `pull_request`); empty = every event. Other events skip the E2E job."
+        type: string
+        default: ""
+      e2e-paths:
+        description: "Glob patterns (one per line, ** allowed, repository-root relative). When set, E2E on pull_request / push runs its steps only if a matching file changed; other events always run."
+        type: string
+        default: ""
+      npm-fetch-timeout:
+        description: "npm fetch-timeout in ms for the install step (npm_config_fetch_timeout; npm's default is 300000). Empty = unset."
+        type: string
+        default: ""
+      npm-fetch-retries:
+        description: "npm fetch-retries for the install step (npm_config_fetch_retries; npm's default is 2). Empty = unset."
+        type: string
+        default: ""
+      npm-audit:
+        description: "Run npm's install-time audit in the default `npm ci` (false = `npm ci --no-audit`). No effect with install-command."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -111,6 +140,16 @@ jobs:
             if [ -f .nvmrc ]; then node="$(cat .nvmrc)"; elif [ -f .node-version ]; then node="$(cat .node-version)"; else node=24; fi
           fi
           echo "pm=$pm" >> "$GITHUB_OUTPUT"; echo "node=$node" >> "$GITHUB_OUTPUT"
+      - name: Check e2e-events
+        # the E2E job matches the list as plain text: a comma or newline would silently skip it
+        if: inputs.e2e-events != ''
+        env:
+          EVENTS: ${{ inputs.e2e-events }}
+        run: |
+          re='^[a-z_ ]+$'
+          if ! [[ "$EVENTS" =~ $re ]]; then
+            echo "::error::e2e-events must be space-separated event names (e.g. 'pull_request push'), got '$EVENTS'"; exit 1
+          fi
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ steps.pm.outputs.node }}
@@ -128,12 +167,20 @@ jobs:
         env:
           PM: ${{ steps.pm.outputs.pm }}
           INSTALL: ${{ inputs.install-command }}
+          FETCH_TIMEOUT: ${{ inputs.npm-fetch-timeout }}
+          FETCH_RETRIES: ${{ inputs.npm-fetch-retries }}
+          AUDIT: ${{ inputs.npm-audit }}
         run: |
+          case "$FETCH_TIMEOUT$FETCH_RETRIES" in *[!0-9]*) echo "::error::npm-fetch-timeout and npm-fetch-retries must be whole numbers"; exit 1 ;; esac
+          # unset unless given: an empty npm_config_* variable would override .npmrc with ''
+          if [ -n "$FETCH_TIMEOUT" ]; then export npm_config_fetch_timeout="$FETCH_TIMEOUT"; fi
+          if [ -n "$FETCH_RETRIES" ]; then export npm_config_fetch_retries="$FETCH_RETRIES"; fi
           if [ -n "$INSTALL" ]; then eval "$INSTALL"; exit 0; fi
           case "$PM" in
             bun) bun install --frozen-lockfile ;;
             pnpm) pnpm install --frozen-lockfile ;;
-            npm) npm ci ;;
+            # the install-time audit only prints a summary (it never fails the install)
+            npm) if [ "$AUDIT" = true ]; then npm ci; else npm ci --no-audit; fi ;;
           esac
       - name: Lint, typecheck, test, build
         env:
@@ -178,20 +225,68 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+  # Two variants of the same E2E job: after Check (default) or in parallel with it
+  # (e2e-needs-check: false). `needs` cannot be conditional, so the steps are shared through a
+  # YAML anchor, as in rust-ci. The parallel variant has its own name so that the default
+  # path never shows two check runs called "E2E".
   e2e:
     name: E2E
-    if: inputs.e2e-command != ''
+    if: inputs.e2e-command != '' && inputs.e2e-needs-check && (inputs.e2e-events == '' || contains(format(' {0} ', inputs.e2e-events), format(' {0} ', github.event_name)))
     needs: check
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.e2e-timeout-minutes }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
-    steps:
+    steps: &e2e-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # e2e-paths on a PR diffs the merge commit against its first parent (the base head)
+          fetch-depth: ${{ (inputs.e2e-paths != '' && github.event_name == 'pull_request') && 2 || 1 }}
+      - name: Changed paths
+        id: paths
+        if: inputs.e2e-paths != ''
+        env:
+          PATTERNS: ${{ inputs.e2e-paths }}
+          BEFORE: ${{ github.event.before }}
+          TOKEN: ${{ github.token }}
+        run: |
+          # Fails open: whenever there is no base to diff against, the tests run.
+          decide() {
+            echo "run=$1" >> "$GITHUB_OUTPUT"
+            [ "$1" = true ] || echo "::notice::E2E skipped: no changed file matches e2e-paths"
+            exit 0
+          }
+          base=""
+          case "$GITHUB_EVENT_NAME" in
+            pull_request)
+              # the checkout is the PR's merge commit; its first parent is the base branch head
+              if git rev-parse -q --verify 'HEAD^2' >/dev/null; then base=$(git rev-parse 'HEAD^1'); fi ;;
+            push)
+              # `before` is all zeros for a new branch; checkout left no credentials, so pass the
+              # token for this one fetch through the environment (not argv, not .git/config)
+              if [ -n "$BEFORE" ] && [ -n "${BEFORE//0/}" ]; then
+                auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')"
+                if GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.$GITHUB_SERVER_URL/.extraheader" GIT_CONFIG_VALUE_0="$auth" \
+                  git fetch -q --no-tags --depth=1 origin "$BEFORE"; then base=$BEFORE; fi
+              fi ;;
+          esac
+          if [ -z "$base" ]; then echo "no base commit for $GITHUB_EVENT_NAME; running E2E"; decide true; fi
+          files=$(git diff --name-only --no-renames "$base" HEAD) || decide true
+          # same matching as docker.yml pr-paths: bash patterns, where * also matches /
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            while IFS= read -r p; do
+              p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
+              [ -n "$p" ] || continue
+              # shellcheck disable=SC2053
+              if [[ "$f" == $p ]]; then echo "$f matches $p"; decide true; fi
+            done <<< "$PATTERNS"
+          done <<< "$files"
+          decide false
       - name: Detect package manager
+        if: steps.paths.outputs.run != 'false'
         id: pm
         env:
           PM: ${{ inputs.package-manager }}
@@ -209,33 +304,45 @@ jobs:
           fi
           echo "pm=$pm" >> "$GITHUB_OUTPUT"; echo "node=$node" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.paths.outputs.run != 'false'
         with:
           node-version: ${{ steps.pm.outputs.node }}
           cache: ${{ steps.pm.outputs.pm != 'bun' && steps.pm.outputs.pm || '' }}
           cache-dependency-path: ${{ inputs.working-directory }}/${{ steps.pm.outputs.pm == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
       - name: Setup pnpm
-        if: steps.pm.outputs.pm == 'pnpm'
+        if: steps.paths.outputs.run != 'false' && (steps.pm.outputs.pm == 'pnpm')
         run: corepack enable pnpm
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        if: steps.pm.outputs.pm == 'bun'
+        if: steps.paths.outputs.run != 'false' && (steps.pm.outputs.pm == 'bun')
         with:
           bun-version: ${{ inputs.bun-version }}
           bun-version-file: ${{ inputs.bun-version == '' && format('{0}/package.json', inputs.working-directory) || '' }}
       - name: Install dependencies
+        if: steps.paths.outputs.run != 'false'
         env:
           PM: ${{ steps.pm.outputs.pm }}
           INSTALL: ${{ inputs.install-command }}
+          FETCH_TIMEOUT: ${{ inputs.npm-fetch-timeout }}
+          FETCH_RETRIES: ${{ inputs.npm-fetch-retries }}
+          AUDIT: ${{ inputs.npm-audit }}
         run: |
+          case "$FETCH_TIMEOUT$FETCH_RETRIES" in *[!0-9]*) echo "::error::npm-fetch-timeout and npm-fetch-retries must be whole numbers"; exit 1 ;; esac
+          # unset unless given: an empty npm_config_* variable would override .npmrc with ''
+          if [ -n "$FETCH_TIMEOUT" ]; then export npm_config_fetch_timeout="$FETCH_TIMEOUT"; fi
+          if [ -n "$FETCH_RETRIES" ]; then export npm_config_fetch_retries="$FETCH_RETRIES"; fi
           if [ -n "$INSTALL" ]; then eval "$INSTALL"; exit 0; fi
           case "$PM" in
             bun) bun install --frozen-lockfile ;;
             pnpm) pnpm install --frozen-lockfile ;;
-            npm) npm ci ;;
+            # the install-time audit only prints a summary (it never fails the install)
+            npm) if [ "$AUDIT" = true ]; then npm ci; else npm ci --no-audit; fi ;;
           esac
       - name: Playwright version
+        if: steps.paths.outputs.run != 'false'
         id: pw
         run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
       - name: Cache Playwright browsers
+        if: steps.paths.outputs.run != 'false'
         id: pw-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -244,7 +351,7 @@ jobs:
       - name: Apt timeouts
         # a stalled mirror (archive.ubuntu.com / azure) holds each package for the default
         # timeout before apt moves on; fail over sooner and retry instead
-        if: runner.os == 'Linux'
+        if: steps.paths.outputs.run != 'false' && (runner.os == 'Linux')
         env:
           DEPS: ${{ inputs.e2e-system-deps }}
         run: |
@@ -253,7 +360,7 @@ jobs:
           if [ "$(id -u)" != 0 ]; then SUDO=sudo; fi
           printf 'Acquire::Retries "5";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | $SUDO tee /etc/apt/apt.conf.d/80-ci-timeouts > /dev/null
       - name: Install browsers
-        if: steps.pw-cache.outputs.cache-hit != 'true'
+        if: steps.paths.outputs.run != 'false' && (steps.pw-cache.outputs.cache-hit != 'true')
         env:
           BROWSERS: ${{ inputs.e2e-browsers }}
           DEPS: ${{ inputs.e2e-system-deps }}
@@ -263,7 +370,7 @@ jobs:
           # shellcheck disable=SC2086
           if [ "$DEPS" = when-missing ]; then node "$pw" install $BROWSERS; else node "$pw" install --with-deps $BROWSERS; fi
       - name: Install browser system deps
-        if: steps.pw-cache.outputs.cache-hit == 'true' || inputs.e2e-system-deps == 'when-missing'
+        if: steps.paths.outputs.run != 'false' && (steps.pw-cache.outputs.cache-hit == 'true' || inputs.e2e-system-deps == 'when-missing')
         env:
           BROWSERS: ${{ inputs.e2e-browsers }}
           DEPS: ${{ inputs.e2e-system-deps }}
@@ -288,9 +395,10 @@ jobs:
           # shellcheck disable=SC2086
           node "$(node -p "require.resolve('@playwright/test/cli')")" install-deps $need
       - name: E2E prepare
-        if: inputs.e2e-prepare-command != ''
+        if: steps.paths.outputs.run != 'false' && (inputs.e2e-prepare-command != '')
         run: ${{ inputs.e2e-prepare-command }}
       - name: E2E tests
+        if: steps.paths.outputs.run != 'false'
         env:
           XVFB: ${{ inputs.e2e-xvfb }}
           CMD: ${{ inputs.e2e-command }}
@@ -306,3 +414,13 @@ jobs:
             ${{ inputs.working-directory }}/playwright-report/
           retention-days: 7
           if-no-files-found: ignore
+
+  e2e-parallel:
+    name: E2E (parallel)
+    if: inputs.e2e-command != '' && !inputs.e2e-needs-check && (inputs.e2e-events == '' || contains(format(' {0} ', inputs.e2e-events), format(' {0} ', github.event_name)))
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.e2e-timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps: *e2e-steps

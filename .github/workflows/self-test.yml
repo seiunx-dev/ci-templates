@@ -59,6 +59,8 @@ jobs:
           cache: false
       - name: go-ci build-cache trim and coverage merge against a real Go toolchain
         run: bash tests/go_cache_test.sh
+      - name: node-ci e2e-paths diff (PR merge commit, multi-commit push, fail-open cases)
+        run: bash tests/node_e2e_paths_test.sh
 
   # rust-ci has two variants of each job: the plain one (no services:/container: keys) runs on
   # Windows/macOS; the services/container one only on Linux.
@@ -149,6 +151,24 @@ jobs:
       working-directory: tests/fixtures/node-e2e
       e2e-command: npx playwright test
       e2e-system-deps: when-missing
+  # The parallel E2E variant (e2e-needs-check: false; same steps through the YAML anchor) with
+  # e2e-events and e2e-paths: on PRs and pushes it runs the tests when the fixture or node-ci.yml
+  # changed and skips the steps otherwise; workflow_dispatch skips the job. The default npm ci
+  # (--no-audit) runs with the fetch-timeout / fetch-retries inputs set.
+  node-e2e-parallel:
+    name: node-ci (e2e parallel)
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      working-directory: tests/fixtures/node-e2e
+      e2e-command: npx playwright test
+      e2e-system-deps: when-missing
+      e2e-needs-check: false
+      e2e-events: pull_request push
+      e2e-paths: |
+        tests/fixtures/node-e2e/**
+        .github/workflows/node-ci.yml
+      npm-fetch-timeout: "60000"
+      npm-fetch-retries: "4"
 
   # Pull requests only: the PR path builds without pushing. Two platforms exercise the QEMU
   # step; pr-paths exercises the changed-files filter; cache-backend: registry exercises the
@@ -468,6 +488,7 @@ jobs:
       - node-npm
       - node-bun
       - node-e2e
+      - node-e2e-parallel
       - docker
       - docker-push
       - docker-build-record
