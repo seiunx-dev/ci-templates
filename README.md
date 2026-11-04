@@ -256,7 +256,7 @@ Jobs：`Lint`（fmt + 每个 feature set 跑 clippy `-D warnings`；`lint: false
 
 私有仓库省分钟（都是 opt-in，默认行为不变）：私有仓库每个 job 按整分钟向上取整计费，10 秒的 job 也算 1 分钟。
 
-- `combined: true`：不单独跑 `Lint`，fmt / clippy / `extra-lint-command` 在 Test job 里、测试之前运行，job 名变成 `Lint and test`（check 名如 `Rust / Lint and test`）。省一次 checkout、工具链安装、缓存恢复和一个取整分钟，代价是 lint 和测试不再并行（wall time 约多 lint 那段）。超时用 `test-timeout-minutes`；rust-cache key 是 `<cache-key-prefix>-combined-test`（coverage 时 `-combined-coverage`），第一次是冷缓存。`lint: false` 时 `combined` 不起作用。
+- `combined: true`：不单独跑 `Lint`，fmt / clippy / `extra-lint-command` 在 Test job 里、测试之前运行（job 名仍是 `Test`，`Lint` 显示为 skipped）。省一次 checkout、工具链安装、缓存恢复和一个取整分钟，代价是 lint 和测试不再并行（wall time 约多 lint 那段）。超时用 `test-timeout-minutes`；rust-cache key 是 `<cache-key-prefix>-combined-test`（coverage 时 `-combined-coverage`），第一次是冷缓存。`lint: false` 时 `combined` 不起作用。
 - `actionlint: true`：在做 lint 的那个 job 里（`Lint`；`combined: true` 或 `lint: false` 时是 Test job）checkout 之后跑 actionlint（版本 `actionlint-version`，与 `actionlint.yml` 同样下载并校验 checksum），替代单独调用 `actionlint.yml`。只支持 Linux / macOS runner；shellcheck 不在 PATH 上时（如 `container` 模式）只给 warning、不检查 `run:` 脚本，要检查就把 `shellcheck` 加进 `apt-packages`。另一个 OS 的 `lint: false` 调用不要再开它，否则会跑两遍。
 - `debuginfo: line-tables-only`：Test job 里导出 `CARGO_PROFILE_DEV_DEBUG` / `CARGO_PROFILE_TEST_DEBUG`，测试构建只带行号表（panic / backtrace 仍有文件和行号，丢变量信息），大 crate 的编译和链接更快。只影响 Test job，不影响 Lint、MSRV 和 release 构建；`env` 里同名变量优先。值变了 rust-cache key 也会变，第一次是冷缓存。
 
@@ -290,7 +290,7 @@ Jobs：`Lint`（fmt + 每个 feature set 跑 clippy `-D warnings`；`lint: false
 | `env` | string | `''` | KEY=VALUE lines exported to both jobs. ${CI_POSTGRES_URL} and ${CI_REDIS_URL} are substituted with the service URLs. |
 | `cache-key-prefix` | string | `rust` | Prefix for rust-cache keys and the coverage artifact name. Change it when one repo calls rust-ci more than once. |
 | `runs-on` | string | `ubuntu-latest` | Runner label. |
-| `combined` | boolean | `false` | Run fmt, clippy and extra-lint-command at the start of the Test job (named "Lint and test") instead of a separate Lint job. Saves one job (checkout, toolchain, cache restore and the per-job minute rounding of private repos) at the cost of lint/test parallelism. The job uses test-timeout-minutes and the rust-cache key <cache-key-prefix>-combined-test (or -combined-coverage). |
+| `combined` | boolean | `false` | Run fmt, clippy and extra-lint-command in the Test job, before the tests, instead of a separate Lint job (the Test job keeps its name). Saves one job (checkout, toolchain, cache restore and the per-job minute rounding of private repos) at the cost of lint/test parallelism. The job uses test-timeout-minutes and the rust-cache key <cache-key-prefix>-combined-test (or -combined-coverage). |
 | `actionlint` | boolean | `false` | Run actionlint (+ shellcheck when it is on PATH) on the repository's workflows as a step of the job that lints: Lint, or the Test job when combined is true or lint is false. Replaces a separate actionlint.yml job. Linux and macOS runners only. |
 | `actionlint-version` | string | `1.7.12` | actionlint release used when actionlint is true (same default as actionlint.yml). |
 | `debuginfo` | string | `''` | Debuginfo level for test builds, exported as CARGO_PROFILE_DEV_DEBUG and CARGO_PROFILE_TEST_DEBUG in the Test job (e.g. line-tables-only: panics and backtraces keep file:line, compile and link get faster). Empty = the project's profile settings. Variables in `env` override it. |

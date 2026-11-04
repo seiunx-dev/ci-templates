@@ -103,7 +103,7 @@ jobs:
       apt-packages: pkg-config
       cache-key-prefix: selftest-ctr
       extra-test-command: $CARGO_TEST --locked -- --ignored service_redis_reachable
-  # Private-repo options: lint and actionlint inside the Test job ("Lint and test"), and
+  # Private-repo options: lint and actionlint inside the Test job (no Lint job), and
   # debuginfo exported to the tests. The marker proves lint ran in the same job before the tests.
   rust-combined:
     name: rust-ci combined + actionlint + debuginfo

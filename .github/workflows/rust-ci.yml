@@ -146,11 +146,11 @@ on:
         default: ubuntu-latest
       combined:
         description: >-
-          Run fmt, clippy and extra-lint-command at the start of the Test job (named "Lint and test")
-          instead of a separate Lint job. Saves one job (checkout, toolchain, cache restore and the
-          per-job minute rounding of private repos) at the cost of lint/test parallelism. The job
-          uses test-timeout-minutes and the rust-cache key <cache-key-prefix>-combined-test
-          (or -combined-coverage).
+          Run fmt, clippy and extra-lint-command in the Test job, before the tests, instead of a
+          separate Lint job (the Test job keeps its name). Saves one job (checkout, toolchain,
+          cache restore and the per-job minute rounding of private repos) at the cost of lint/test
+          parallelism. The job uses test-timeout-minutes and the rust-cache key
+          <cache-key-prefix>-combined-test (or -combined-coverage).
         type: boolean
         default: false
       actionlint:
@@ -230,8 +230,8 @@ jobs:
           base="https://github.com/rhysd/actionlint/releases/download/v${VERSION}"
           file="actionlint_${VERSION}_${os}_${arch}.tar.gz"
           dir="$RUNNER_TEMP/actionlint"; mkdir -p "$dir"; cd "$dir"
-          curl -fsSL --retry 3 -o "$file" "$base/$file"
-          curl -fsSL --retry 3 -o checksums.txt "$base/actionlint_${VERSION}_checksums.txt"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$file" "$base/$file"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o checksums.txt "$base/actionlint_${VERSION}_checksums.txt"
           if command -v sha256sum > /dev/null; then sum=(sha256sum); else sum=(shasum -a 256); fi
           grep " ${file}\$" checksums.txt | "${sum[@]}" -c -
           tar -xzf "$file" actionlint
@@ -343,7 +343,7 @@ jobs:
   # Windows/macOS; the steps are shared through a YAML anchor. With `combined: true` the lint
   # steps (the same step definitions as in Lint, through YAML aliases) run here too.
   test:
-    name: ${{ inputs.combined && inputs.lint && 'Lint and test' || 'Test' }}
+    name: Test
     if: inputs.postgres-image == '' && inputs.redis-image == '' && inputs.container == ''
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.test-timeout-minutes }}
@@ -492,7 +492,7 @@ jobs:
           if-no-files-found: error
 
   test-services:
-    name: ${{ inputs.combined && inputs.lint && 'Lint and test' || 'Test' }}
+    name: Test
     if: inputs.postgres-image != '' || inputs.redis-image != '' || inputs.container != ''
     runs-on: ${{ inputs.runs-on }}
     container: ${{ inputs.container }}
