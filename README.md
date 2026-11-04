@@ -351,8 +351,8 @@ E2E 和安装的开关（除 `npm-audit` 外默认都保持原行为；`npm-audi
 - `e2e-needs-check: false`：E2E 不等 `Check`，和它并行（job 名 `E2E (parallel)`，步骤与 `E2E` 通过 YAML anchor 共用）。wall time 少一个 Check，代价是 Check 失败时 E2E 也照跑；私有仓库的计费分钟数不变。
 - `e2e-events`：空格分隔的事件名（如 `pull_request`），其他事件直接跳过 E2E job（0 分钟）。写了逗号 / 换行时 `Check` 报错，免得 E2E 悄悄永远不跑。只在 PR 上跑 E2E 时，main 上的 "CI OK" 不再包含 E2E（合并顺序偏差要靠 PR 上的结果兜住）。
 - `e2e-paths`：每行一个 glob（相对仓库根，匹配规则同 `docker.yml` 的 `pr-paths`：bash 模式，`*` 也匹配 `/`）。在 E2E job 里用 git diff 判断，不额外开 job：pull_request 比较 merge commit 和它的第一个父提交（base 分支头），push 比较 `before`..`sha`（包含整次 push 的所有提交，`before` 用 `github.token` 单独 fetch 一次，不写进 `.git/config`）；没有改到匹配的文件时其余步骤全部跳过，job 仍是成功。拿不到比较基准时（新分支、`before` 取不到、其他事件、pull_request_target）一律照跑。重命名两端的路径都算改动。job 本身还是会启动（私有仓库按 1 分钟计费），省的是安装、浏览器和测试的时间。
-- `npm-fetch-timeout` / `npm-fetch-retries`：给安装步骤导出 `npm_config_fetch_timeout` / `npm_config_fetch_retries`（`install-command` 里的命令也生效；空 = 不设置，沿用 `.npmrc` 和 npm 默认的 300000 ms / 2 次）。registry 偶尔卡住一个请求时，npm 默认要等满 5 分钟才重试。
-- `npm-audit`（默认 `false`）：模板自己的 `npm ci` 带 `--no-audit`。安装时的 audit 只打印一行汇总、不影响退出码，只多一次 registry 请求；`npm audit` 命令本身不受影响。设了 `install-command` 时不起作用（需要的话在命令里自己写 `--no-audit`）。v1.1.11 及以前默认的 `npm ci` 会做这次 audit。
+- `npm-fetch-timeout` / `npm-fetch-retries`：给安装步骤导出 `NPM_CONFIG_FETCH_TIMEOUT` / `NPM_CONFIG_FETCH_RETRIES`（`install-command` 里的命令也生效；空 = 不设置，沿用 `.npmrc` 和 npm 默认的 300000 ms / 2 次）。registry 偶尔卡住一个请求时，npm 默认要等满 5 分钟才重试。
+- `npm-audit`（默认 `false`）：模板自己的 `npm ci` 不做安装时 audit（导出 `NPM_CONFIG_AUDIT=false`，等同 `--no-audit`）。安装时的 audit 只打印一行汇总、不影响退出码，只多一次 registry 请求；`npm audit` 命令本身不受影响。设了 `install-command` 时不起作用（需要的话在命令里自己写 `--no-audit`）。v1.1.11 及以前默认的 `npm ci` 会做这次 audit。
 
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -378,8 +378,8 @@ E2E 和安装的开关（除 `npm-audit` 外默认都保持原行为；`npm-audi
 | `e2e-needs-check` | boolean | `true` | true: E2E starts after Check passes. false: E2E runs in parallel with Check (it then also runs when Check fails). |
 | `e2e-events` | string | `''` | Space-separated event names E2E runs on (e.g. `pull_request`); empty = every event. Other events skip the E2E job. |
 | `e2e-paths` | string | `''` | Glob patterns (one per line, ** allowed, repository-root relative). When set, E2E on pull_request / push runs its steps only if a matching file changed; other events always run. |
-| `npm-fetch-timeout` | string | `''` | npm fetch-timeout in ms for the install step (npm_config_fetch_timeout; npm's default is 300000). Empty = unset. |
-| `npm-fetch-retries` | string | `''` | npm fetch-retries for the install step (npm_config_fetch_retries; npm's default is 2). Empty = unset. |
+| `npm-fetch-timeout` | string | `''` | npm fetch-timeout in ms for the install step (NPM_CONFIG_FETCH_TIMEOUT; npm's default is 300000). Empty = unset. |
+| `npm-fetch-retries` | string | `''` | npm fetch-retries for the install step (NPM_CONFIG_FETCH_RETRIES; npm's default is 2). Empty = unset. |
 | `npm-audit` | boolean | `false` | Run npm's install-time audit in the default `npm ci` (false = `npm ci --no-audit`). No effect with install-command. |
 
 ### `sonar.yml` — Sonar

@@ -96,11 +96,11 @@ on:
         type: string
         default: ""
       npm-fetch-timeout:
-        description: "npm fetch-timeout in ms for the install step (npm_config_fetch_timeout; npm's default is 300000). Empty = unset."
+        description: "npm fetch-timeout in ms for the install step (NPM_CONFIG_FETCH_TIMEOUT; npm's default is 300000). Empty = unset."
         type: string
         default: ""
       npm-fetch-retries:
-        description: "npm fetch-retries for the install step (npm_config_fetch_retries; npm's default is 2). Empty = unset."
+        description: "npm fetch-retries for the install step (NPM_CONFIG_FETCH_RETRIES; npm's default is 2). Empty = unset."
         type: string
         default: ""
       npm-audit:
@@ -171,16 +171,21 @@ jobs:
           FETCH_RETRIES: ${{ inputs.npm-fetch-retries }}
           AUDIT: ${{ inputs.npm-audit }}
         run: |
-          case "$FETCH_TIMEOUT$FETCH_RETRIES" in *[!0-9]*) echo "::error::npm-fetch-timeout and npm-fetch-retries must be whole numbers"; exit 1 ;; esac
-          # unset unless given: an empty npm_config_* variable would override .npmrc with ''
-          if [ -n "$FETCH_TIMEOUT" ]; then export npm_config_fetch_timeout="$FETCH_TIMEOUT"; fi
-          if [ -n "$FETCH_RETRIES" ]; then export npm_config_fetch_retries="$FETCH_RETRIES"; fi
+          if ! [[ "$FETCH_TIMEOUT$FETCH_RETRIES" =~ ^[0-9]*$ ]]; then
+            echo "::error::npm-fetch-timeout and npm-fetch-retries must be whole numbers"; exit 1
+          fi
+          # npm reads NPM_CONFIG_* case-insensitively; unset unless given, since an empty
+          # variable would override .npmrc with ''
+          if [ -n "$FETCH_TIMEOUT" ]; then export NPM_CONFIG_FETCH_TIMEOUT="$FETCH_TIMEOUT"; fi
+          if [ -n "$FETCH_RETRIES" ]; then export NPM_CONFIG_FETCH_RETRIES="$FETCH_RETRIES"; fi
           if [ -n "$INSTALL" ]; then eval "$INSTALL"; exit 0; fi
+          # the template's own npm ci skips the install-time audit (= --no-audit) unless
+          # npm-audit: it only prints a summary and never fails the install
+          if [ "$PM" = npm ] && [ "$AUDIT" != true ]; then export NPM_CONFIG_AUDIT=false; fi
           case "$PM" in
             bun) bun install --frozen-lockfile ;;
             pnpm) pnpm install --frozen-lockfile ;;
-            # the install-time audit only prints a summary (it never fails the install)
-            npm) if [ "$AUDIT" = true ]; then npm ci; else npm ci --no-audit; fi ;;
+            npm) npm ci ;;
           esac
       - name: Lint, typecheck, test, build
         env:
@@ -254,8 +259,9 @@ jobs:
         run: |
           # Fails open: whenever there is no base to diff against, the tests run.
           decide() {
-            echo "run=$1" >> "$GITHUB_OUTPUT"
-            [ "$1" = true ] || echo "::notice::E2E skipped: no changed file matches e2e-paths"
+            local run="$1"
+            echo "run=$run" >> "$GITHUB_OUTPUT"
+            [ "$run" = true ] || echo "::notice::E2E skipped: no changed file matches e2e-paths"
             exit 0
           }
           base=""
@@ -271,6 +277,7 @@ jobs:
                 if GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.$GITHUB_SERVER_URL/.extraheader" GIT_CONFIG_VALUE_0="$auth" \
                   git fetch -q --no-tags --depth=1 origin "$BEFORE"; then base=$BEFORE; fi
               fi ;;
+            *) ;; # other events have no base to diff against
           esac
           if [ -z "$base" ]; then echo "no base commit for $GITHUB_EVENT_NAME; running E2E"; decide true; fi
           files=$(git diff --name-only --no-renames "$base" HEAD) || decide true
@@ -326,16 +333,21 @@ jobs:
           FETCH_RETRIES: ${{ inputs.npm-fetch-retries }}
           AUDIT: ${{ inputs.npm-audit }}
         run: |
-          case "$FETCH_TIMEOUT$FETCH_RETRIES" in *[!0-9]*) echo "::error::npm-fetch-timeout and npm-fetch-retries must be whole numbers"; exit 1 ;; esac
-          # unset unless given: an empty npm_config_* variable would override .npmrc with ''
-          if [ -n "$FETCH_TIMEOUT" ]; then export npm_config_fetch_timeout="$FETCH_TIMEOUT"; fi
-          if [ -n "$FETCH_RETRIES" ]; then export npm_config_fetch_retries="$FETCH_RETRIES"; fi
+          if ! [[ "$FETCH_TIMEOUT$FETCH_RETRIES" =~ ^[0-9]*$ ]]; then
+            echo "::error::npm-fetch-timeout and npm-fetch-retries must be whole numbers"; exit 1
+          fi
+          # npm reads NPM_CONFIG_* case-insensitively; unset unless given, since an empty
+          # variable would override .npmrc with ''
+          if [ -n "$FETCH_TIMEOUT" ]; then export NPM_CONFIG_FETCH_TIMEOUT="$FETCH_TIMEOUT"; fi
+          if [ -n "$FETCH_RETRIES" ]; then export NPM_CONFIG_FETCH_RETRIES="$FETCH_RETRIES"; fi
           if [ -n "$INSTALL" ]; then eval "$INSTALL"; exit 0; fi
+          # the template's own npm ci skips the install-time audit (= --no-audit) unless
+          # npm-audit: it only prints a summary and never fails the install
+          if [ "$PM" = npm ] && [ "$AUDIT" != true ]; then export NPM_CONFIG_AUDIT=false; fi
           case "$PM" in
             bun) bun install --frozen-lockfile ;;
             pnpm) pnpm install --frozen-lockfile ;;
-            # the install-time audit only prints a summary (it never fails the install)
-            npm) if [ "$AUDIT" = true ]; then npm ci; else npm ci --no-audit; fi ;;
+            npm) npm ci ;;
           esac
       - name: Playwright version
         if: steps.paths.outputs.run != 'false'
