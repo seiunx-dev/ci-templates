@@ -154,7 +154,8 @@ jobs:
   # The parallel E2E variant (e2e-needs-check: false; same steps through the YAML anchor) with
   # e2e-events and e2e-paths: on PRs and pushes it runs the tests when the fixture or node-ci.yml
   # changed and skips the steps otherwise; workflow_dispatch skips the job. The default npm ci
-  # (--no-audit) runs with the fetch-timeout / fetch-retries inputs set.
+  # runs with npm-audit: false (--no-audit) and the fetch-timeout / fetch-retries inputs set;
+  # node-e2e above keeps the default npm-audit: true path.
   node-e2e-parallel:
     name: node-ci (e2e parallel)
     uses: ./.github/workflows/node-ci.yml
@@ -169,6 +170,7 @@ jobs:
         .github/workflows/node-ci.yml
       npm-fetch-timeout: "60000"
       npm-fetch-retries: "4"
+      npm-audit: false
 
   # Pull requests only: the PR path builds without pushing. Two platforms exercise the QEMU
   # step; pr-paths exercises the changed-files filter; cache-backend: registry exercises the

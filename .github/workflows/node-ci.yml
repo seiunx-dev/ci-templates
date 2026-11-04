@@ -104,9 +104,9 @@ on:
         type: string
         default: ""
       npm-audit:
-        description: "Run npm's install-time audit in the default `npm ci` (false = `npm ci --no-audit`). No effect with install-command."
+        description: "Run npm's install-time audit in the default `npm ci`; false exports NPM_CONFIG_AUDIT=false (= `npm ci --no-audit`), true leaves .npmrc / npm defaults alone. No effect with install-command."
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
@@ -179,8 +179,8 @@ jobs:
           if [ -n "$FETCH_TIMEOUT" ]; then export NPM_CONFIG_FETCH_TIMEOUT="$FETCH_TIMEOUT"; fi
           if [ -n "$FETCH_RETRIES" ]; then export NPM_CONFIG_FETCH_RETRIES="$FETCH_RETRIES"; fi
           if [ -n "$INSTALL" ]; then eval "$INSTALL"; exit 0; fi
-          # the template's own npm ci skips the install-time audit (= --no-audit) unless
-          # npm-audit: it only prints a summary and never fails the install
+          # npm-audit: false makes the template's own npm ci skip the install-time audit
+          # (= --no-audit); true (the default) leaves .npmrc / npm defaults in charge
           if [ "$PM" = npm ] && [ "$AUDIT" != true ]; then export NPM_CONFIG_AUDIT=false; fi
           case "$PM" in
             bun) bun install --frozen-lockfile ;;
@@ -341,8 +341,8 @@ jobs:
           if [ -n "$FETCH_TIMEOUT" ]; then export NPM_CONFIG_FETCH_TIMEOUT="$FETCH_TIMEOUT"; fi
           if [ -n "$FETCH_RETRIES" ]; then export NPM_CONFIG_FETCH_RETRIES="$FETCH_RETRIES"; fi
           if [ -n "$INSTALL" ]; then eval "$INSTALL"; exit 0; fi
-          # the template's own npm ci skips the install-time audit (= --no-audit) unless
-          # npm-audit: it only prints a summary and never fails the install
+          # npm-audit: false makes the template's own npm ci skip the install-time audit
+          # (= --no-audit); true (the default) leaves .npmrc / npm defaults in charge
           if [ "$PM" = npm ] && [ "$AUDIT" != true ]; then export NPM_CONFIG_AUDIT=false; fi
           case "$PM" in
             bun) bun install --frozen-lockfile ;;
