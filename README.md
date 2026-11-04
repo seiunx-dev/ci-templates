@@ -36,6 +36,7 @@ Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-te
 | `tests/sonar_args_test.py` | `sonar.yml` 参数构建步骤的单元测试（直接取工作流里的脚本运行） |
 | `tests/docker_retag_test.sh` | `docker-retag.yml` 顺序保护的测试（取工作流里的脚本，桩掉 docker / gh） |
 | `tests/verify_version_test.sh` | `actions/verify-version` 的事件 / ref 组合测试（只有 tag push 时 `is-tag=true`），以及 `go` / `none` 版本来源 |
+| `tests/wait_for_checks_test.sh` | `actions/wait-for-checks` 的测试（取 action 里的脚本，桩掉 gh / sleep）：只有 `completed success` 放行；`timeout-minutes: 0` 只查一次 |
 
 ## 怎么调用
 
@@ -166,6 +167,18 @@ jobs:
 - **两个工作流**：`CI`（push main、pull_request main、workflow_dispatch）和 `Release`（push tags `v*`；workflow_dispatch 用作 dry run，构建全部产物但不发布任何东西，在 tag 上手动触发也一样：只有 tag 的 push 事件会发布）。
 - **Docker 不等测试**（v1.1.0 起）：CI 里的 docker job 不 `needs` 测试，和测试并行，`defer-moving-tags: true`。main 上构建完立刻推不可变的 `:sha-<完整 sha>`、`:sha-<7 位>`（和 `:buildcache`）；`:main` 这类移动 tag 由 `ci-ok` 之后的 `docker-retag.yml` job 移过去（重打 tag，不重建），所以 `:main` 只会指向 "CI OK" 通过的 commit，但会比 `:sha-*` 晚到（晚多少取决于测试和 Sonar 比镜像构建慢多少）。部署要尽早拿到镜像就 pin `:sha-<7 位>`。测试失败的 commit 也会留下 `:sha-*` 镜像，但它没有 "CI OK"，release-gate 不会放行它的 tag。只有 docker 构建要用测试 job 产出的构件（`artifact-name`）时才保留 `needs`。
 - **Release 不变**：release-gate 等被打 tag 的 commit 上 "CI OK" 变绿（docker 在 `ci-ok` 的 needs 里，所以 `:sha-<sha>` 一定已经在），`promote-on-tag` 再把它重打成 `:X.Y.Z` / `:X.Y` / `:latest`。
+- **Release 不等 CI**（可选，私有仓库省分钟数）：release-gate 默认在 Gate job 里每 30 秒查一次、最多等 `wait-minutes`（30）分钟，等待期间 runner 一直在计费（SekaiColo 每次约 10 分钟）。设 `wait-minutes: 0` 后 Gate 只查一次：被打 tag 的 commit 上 "CI OK" 已经是 `success` 才放行，还在跑、还没出现、失败或取消都立刻失败，后面的构建 / 发布 job 全部不跑。保证不变：只有 "CI OK" 绿了的 commit 能发布，`:sha-<sha>` 镜像也一定已经推了。代价是打 tag 的顺序：先等 main 上这个 commit 的 "CI OK" 变绿，再推 tag；tag 推早了，Release run 会红，等 "CI OK" 绿了以后 `gh run rerun <run-id>` 重跑即可（不用删 tag）。在本地等 CI 不花 Actions 分钟数，例如在发版脚本里：
+
+  ```sh
+  sha=$(git rev-parse origin/main)   # 要打 tag 的 commit
+  while :; do
+    s=$(gh api "repos/{owner}/{repo}/commits/$sha/check-runs" -f check_name='CI OK' -f filter=latest -X GET \
+          --jq '.check_runs | sort_by(.started_at) | last | "\(.status) \(.conclusion)"')
+    case "$s" in "completed success") break ;; completed*) echo "CI OK: $s"; exit 1 ;; esac
+    sleep 30
+  done
+  git tag -a v1.2.3 "$sha" -m v1.2.3 && git push origin v1.2.3
+  ```
 - **唯一的 required check 是 `CI OK`**：它是 `ci-ok` 聚合 job，`needs` 其余所有 job；有 job failure 或 cancelled 就失败，skipped 视为通过。
 - **concurrency**：PR 用 `${workflow}-pr-<PR号>` 并 cancel-in-progress；其他事件用 `${workflow}-<事件>-<sha>`，每个 commit 一组。不能用 `ref` 分组：同组里排队中的 run 会被更新的 run 顶掉（即使 cancel-in-progress 是 false），连续 push 三次时中间那个 commit 就没有 "CI OK" 和 `:sha-<sha>` 镜像，给它打 tag 会让 gate 失败。Release 用 `release-${ref}`，从不取消。可复用工作流内部不定义 concurrency：被调用的工作流里 `github.workflow` 取到的是调用方的名字，自己再定义会和调用方的 group 撞上导致死锁。
 - **权限**：顶层 `contents: read`。只有需要写权限的 job 才提权：Docker job 给 `packages: write`（PR 上不推送；`cache-backend: registry` 时 PR 只登录读取 `:buildcache`），发布 job 给 `contents: write`，PyPI/npm 发布 job 给 `id-token: write`，gate job 给 `checks: read`。
@@ -214,7 +227,7 @@ jobs:
   - rust-release：cargo（linux/macOS/Windows）+ zigbuild（glibc 2.17），随后检查产物文件名、tar.gz/zip、dir/flat 布局、额外文件和 glibc 符号版本；
   - docker：PR 上构建 amd64 + arm64（不推送；用 registry 缓存，覆盖只读登录和 pr-paths 过滤）；两个 docker job 都设 `build-record: false`，随后检查本次 run 没有 `.dockerbuild` 构件；push main 和 workflow_dispatch 时走 `defer-moving-tags` 推送路径，镜像是一次性的 `ghcr.io/seiunx-dev/ci-templates-selftest`：先检查 `:sha-*` 已推、分支 tag 没动，过一个替身 "CI OK" job，再用 `docker-retag.yml` 移分支 tag，最后检查分支 tag 指向同一个 digest（没有重建）；pages：只构建（`deploy: false`）。
   - sonar：`tests/sonar_args_test.py` 单元测试参数构建（multicriteria 合并、properties 语法、`project-version: auto`、report paths）。
-- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖；`verify-version` 的事件 / ref 组合（只有 tag push 发布）由 `tests/verify_version_test.sh` 覆盖。node-ci `e2e-paths` 的 diff（PR merge commit、多提交 push、各种照跑的情况）由 `tests/node_e2e_paths_test.sh` 在临时 git 仓库里覆盖，它也检查两个 E2E 变体的步骤相同。`maturin-wheels.yml` 冒烟测试的 `test` 条件由 `maturin-test-guard` job 在 GitHub 上对 `test` 缺省 / false / true 求值，`tests/maturin_test_guard_test.py` 检查两处用的是同一个表达式，并禁止表达式与裸 `true` / `false` 比较（缺省的 key 是 null，null == false）。
+- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖；`verify-version` 的事件 / ref 组合（只有 tag push 发布）由 `tests/verify_version_test.sh` 覆盖；`wait-for-checks` 的放行条件（只有 `completed success`）和 `timeout-minutes: 0` 只查一次（只重试 API 错误，最多 3 次）由 `tests/wait_for_checks_test.sh` 用桩掉的 gh 覆盖。node-ci `e2e-paths` 的 diff（PR merge commit、多提交 push、各种照跑的情况）由 `tests/node_e2e_paths_test.sh` 在临时 git 仓库里覆盖，它也检查两个 E2E 变体的步骤相同。`maturin-wheels.yml` 冒烟测试的 `test` 条件由 `maturin-test-guard` job 在 GitHub 上对 `test` 缺省 / false / true 求值，`tests/maturin_test_guard_test.py` 检查两处用的是同一个表达式，并禁止表达式与裸 `true` / `false` 比较（缺省的 key 是 null，null == false）。
 
 ## 迁移前检查
 
@@ -477,7 +490,7 @@ Job：`Gate`。调用方 job 权限：`contents: read`、`checks: read`。output
 | `version-extra-paths` | string | `''` | Other manifests that must carry the same version, one per line. |
 | `tag-prefix` | string | `v` | tag 前缀（v、engine-v ...）。 |
 | `require-check` | string | `CI OK` | Check run that must be green on the tagged commit. Empty = do not wait. |
-| `wait-minutes` | number | `30` | Maximum wait for the check (the job itself times out at 60). |
+| `wait-minutes` | number | `30` | Maximum wait for the check (the job itself times out at 60). `0` = check once and fail at once unless it has already succeeded (no billed wait; tag only after "CI OK" is green, see 约定 "Release 不等 CI"). |
 
 outputs: `version`, `tag`, `is-tag`, `prerelease`
 
@@ -512,6 +525,7 @@ Job：`Build <label>`（每个 target 一个）。产物：构件 `release-<labe
 | `asset-name` | string | `{name}-{version}-{label}` | Archive name template: {name} {version} {tag} {label} {target}. |
 | `layout` | string | `dir` | dir (files under a top-level folder) \| flat (files at archive root) |
 | `upload-binaries` | boolean | `false` | Also upload raw binaries as artifact bin-<label> (e.g. for a thin Docker image built from them). |
+| `fail-fast` | boolean | `false` | Cancel the other targets as soon as one fails (default false = every target finishes). 一个 target 失败时 gh-release 本来就发不出去（它要全部构件），私有仓库设 `true` 可以省掉其余 target（尤其是按 10 倍计费的 macOS）的分钟数；代价是 dry run 里看不到其余 target 的结果。 |
 | `timeout-minutes` | number | `60` | job 超时（分钟）。 |
 
 secrets: `build-secret-1`, `build-secret-2`, `build-secret-3`
@@ -666,7 +680,7 @@ Block until the named check run on a commit has completed, and fail unless it su
 |---|---|---|
 | `check-name` | `CI OK` | Check run name to wait for (the aggregate job name in ci.yml). |
 | `sha` | `${{ github.sha }}` | Commit to inspect. |
-| `timeout-minutes` | `30` | Give up after this many minutes. |
+| `timeout-minutes` | `30` | Give up after this many minutes. `0` = check once, without waiting: fail unless the check has already succeeded (a transient API error is retried up to 3 times, 5 s apart). |
 | `token` | `${{ github.token }}` | Token with checks:read. |
 
 ## License

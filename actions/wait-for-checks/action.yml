@@ -3,6 +3,8 @@ description: >-
   Block until the named check run on a commit has completed, and fail unless it succeeded.
   Used by release workflows so a tag on a red (or still running) main commit never ships,
   and so the main-built image already exists when the tag re-tags it.
+  `timeout-minutes: 0` checks once and fails at once unless the check already succeeded
+  (no billed wait; push the tag only after the check is green).
   Needs `checks: read` (and `contents: read`).
 inputs:
   check-name:
@@ -12,7 +14,9 @@ inputs:
     description: Commit to inspect.
     default: ${{ github.sha }}
   timeout-minutes:
-    description: Give up after this many minutes.
+    description: >-
+      Give up after this many minutes. 0 = check once, without waiting: fail unless the check
+      has already succeeded (a transient API error is retried up to 3 times, 5 s apart).
     default: "30"
   token:
     description: Token with checks:read.
@@ -30,6 +34,7 @@ runs:
       run: |
         set -uo pipefail
         deadline=$(( $(date +%s) + TIMEOUT * 60 ))
+        api_errors=0
         while :; do
           state=$(gh api -X GET "repos/$GITHUB_REPOSITORY/commits/$SHA/check-runs" \
                     -f check_name="$CHECK" -f filter=latest \
@@ -39,6 +44,14 @@ runs:
             "completed cancelled") echo "::error::\"$CHECK\" on $SHA was cancelled. Re-run the CI run of this commit, then re-run this release."; exit 1 ;;
             completed*) echo "::error::\"$CHECK\" on $SHA finished as '${state#completed }'. Fix main before tagging."; exit 1 ;;
           esac
+          if [ "$TIMEOUT" = 0 ]; then
+            # Check-once mode: never bill a runner for the wait. Only a failed API call is retried.
+            if [ "$state" = api-error ] && [ "$api_errors" -lt 3 ]; then
+              api_errors=$((api_errors + 1)); echo "check-runs API error; retry $api_errors/3 in 5s"; sleep 5; continue
+            fi
+            echo "::error::\"$CHECK\" on $SHA has not succeeded yet (state: $state), and timeout-minutes is 0 (check once, no wait). Push the tag only after \"$CHECK\" is green, or re-run this release run once it is."
+            exit 1
+          fi
           if [ "$(date +%s)" -ge "$deadline" ]; then
             echo "::error::timed out after ${TIMEOUT}m waiting for \"$CHECK\" on $SHA (last state: $state). Was this commit pushed to the default branch?"
             exit 1

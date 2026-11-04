@@ -3,6 +3,9 @@
 #   2. On a tag push, waits until the aggregate CI check ("CI OK") of the tagged commit is
 #      green, so a red commit is never released and the main-built image/artifacts exist.
 #      workflow_dispatch runs (dry runs) skip the wait.
+#      `wait-minutes: 0` checks once instead of polling: the gate fails at once unless "CI OK"
+#      has already succeeded, so no runner is billed while CI runs. Push the tag only after
+#      "CI OK" is green (see README, 约定 "Release 不等 CI"), or re-run the release run once it is.
 # Its outputs feed the build/publish jobs.
 name: Release gate
 
@@ -29,7 +32,9 @@ on:
         type: string
         default: CI OK
       wait-minutes:
-        description: Maximum wait for the check (the job itself times out at 60).
+        description: >-
+          Maximum wait for the check (the job itself times out at 60). 0 = check once and fail at
+          once unless it has already succeeded (no billed wait; tag only after CI OK is green).
         type: number
         default: 30
     outputs:

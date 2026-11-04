@@ -20,6 +20,10 @@
 # honest cold build. `cache: true` restores `release-<label>`, which only a default-branch
 # run writes: run the workflow by hand on main (the dry run) to warm it.
 #
+# fail-fast: false (default) lets every target finish even when one fails. `fail-fast: true`
+# cancels the other targets as soon as one fails; a failed leg already blocks gh-release.yml
+# (it needs every archive), so on private repos the remaining legs (macOS bills x10) are waste.
+#
 # Caller example:
 #   binaries:
 #     needs: gate
@@ -138,6 +142,10 @@ on:
         description: Also upload raw binaries as artifact bin-<label> (e.g. for a thin Docker image built from them).
         type: boolean
         default: false
+      fail-fast:
+        description: Cancel the other targets as soon as one fails (default false = every target finishes).
+        type: boolean
+        default: false
       timeout-minutes:
         type: number
         default: 60
@@ -162,7 +170,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
-      fail-fast: false
+      fail-fast: ${{ inputs.fail-fast }}
       matrix:
         include: ${{ fromJSON(inputs.targets) }}
     steps:

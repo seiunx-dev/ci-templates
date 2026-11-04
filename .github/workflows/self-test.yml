@@ -51,6 +51,8 @@ jobs:
         run: bash tests/docker_retag_test.sh
       - name: verify-version event / ref matrix (only a tag push publishes) and go / none sources
         run: bash tests/verify_version_test.sh
+      - name: wait-for-checks only passes a succeeded check; timeout-minutes 0 looks once
+        run: bash tests/wait_for_checks_test.sh
       - name: maturin-wheels smoke-test guard and loose boolean comparisons
         run: python3 tests/maturin_test_guard_test.py
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
