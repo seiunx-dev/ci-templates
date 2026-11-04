@@ -5,7 +5,8 @@
 # job (PyPI trusted publishing does not work from inside a reusable workflow).
 #
 # Fewer billed jobs for private repos (opt-in): `combined: true` runs the lint steps (and
-# build-dist) in the first test leg instead of a separate Lint job; `actionlint: true` runs
+# build-dist, from the clean checkout before anything else touches the tree) in the first test
+# leg instead of a separate Lint job; `actionlint: true` runs
 # actionlint as a step of the job that lints instead of a separate actionlint.yml job.
 name: Python CI
 
@@ -71,7 +72,8 @@ on:
       combined:
         description: >-
           Run ruff, lint-command and build-dist in the first test leg (the first python-versions
-          entry, after uv sync) instead of a separate Lint job. Saves one job; lint-command then
+          entry; build-dist right after setup-uv on the clean checkout, ruff and lint-command after
+          uv sync) instead of a separate Lint job. Saves one job; lint-command then
           sees the test job's env, services and downloaded artifact. Ignored when test-command is
           empty (the Lint job runs as usual).
         type: boolean
@@ -104,9 +106,10 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     env:
-      # Read by the step conditions shared with the test job (see `combined`).
-      PYTHON_CI_LINT: "true"
-      PYTHON_CI_ACTIONLINT: ${{ inputs.actionlint }}
+      # Read by the step conditions shared with the test job (see `combined`). Same names as in
+      # rust-ci (CI_TPL_ prefix, which no cache action hashes into its key).
+      CI_TPL_LINT: "true"
+      CI_TPL_ACTIONLINT: ${{ inputs.actionlint }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -118,7 +121,7 @@ jobs:
       # not pay a rounded minute for a separate job. Runs from the repository root.
       - &actionlint-install
         name: Install actionlint
-        if: env.PYTHON_CI_ACTIONLINT == 'true'
+        if: env.CI_TPL_ACTIONLINT == 'true'
         shell: bash
         env:
           VERSION: ${{ inputs.actionlint-version }}
@@ -145,7 +148,7 @@ jobs:
           echo "$dir" >> "$GITHUB_PATH"
       - &actionlint-run
         name: actionlint
-        if: env.PYTHON_CI_ACTIONLINT == 'true'
+        if: env.CI_TPL_ACTIONLINT == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -165,7 +168,7 @@ jobs:
           save-cache: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
       - &ruff-step
         name: ruff
-        if: env.PYTHON_CI_LINT == 'true' && inputs.ruff
+        if: env.CI_TPL_LINT == 'true' && inputs.ruff
         run: |
           # The project's locked ruff when uv.lock has one, run via uvx so it does not depend
           # on which extra or dependency group pulls ruff in (`uv run` would only sync the
@@ -184,7 +187,7 @@ jobs:
           $ruff format --check .
       - &extra-lint-step
         name: Extra lint
-        if: env.PYTHON_CI_LINT == 'true' && inputs.lint-command != ''
+        if: env.CI_TPL_LINT == 'true' && inputs.lint-command != ''
         env:
           SYNC_ARGS: ${{ inputs.sync-args }}
         run: |
@@ -193,11 +196,11 @@ jobs:
           ${{ inputs.lint-command }}
       - &build-dist-step
         name: Build sdist and wheel
-        if: env.PYTHON_CI_LINT == 'true' && inputs.build-dist
+        if: env.CI_TPL_LINT == 'true' && inputs.build-dist
         run: uv build
       - &upload-dist-step
         name: Upload dist
-        if: env.PYTHON_CI_LINT == 'true' && inputs.build-dist
+        if: env.CI_TPL_LINT == 'true' && inputs.build-dist
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
@@ -216,8 +219,8 @@ jobs:
         python: ${{ fromJSON(inputs.python-versions) }}
     env:
       # Without combined both are false, so the aliased lint steps below are skipped.
-      PYTHON_CI_LINT: ${{ inputs.combined && strategy.job-index == 0 }}
-      PYTHON_CI_ACTIONLINT: ${{ inputs.actionlint && inputs.combined && strategy.job-index == 0 }}
+      CI_TPL_LINT: ${{ inputs.combined && strategy.job-index == 0 }}
+      CI_TPL_ACTIONLINT: ${{ inputs.actionlint && inputs.combined && strategy.job-index == 0 }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -256,6 +259,11 @@ jobs:
           working-directory: ${{ inputs.working-directory }}
           enable-cache: true
           save-cache: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      # Build dist before the downloaded artifact, setup-command, uv sync and the tests write
+      # into the tree, so the sdist/wheel come from the same clean checkout as in the Lint job
+      # (VCS-based backends package every file that is not gitignored).
+      - *build-dist-step
+      - *upload-dist-step
       - name: Download artifact
         if: inputs.download-artifact != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -296,5 +304,3 @@ jobs:
           path: ${{ inputs.working-directory }}/${{ inputs.coverage-path }}
           retention-days: 3
           if-no-files-found: error
-      - *build-dist-step
-      - *upload-dist-step

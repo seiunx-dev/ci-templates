@@ -336,7 +336,7 @@ Jobs：`Lint`（gofmt、`go mod tidy -diff`、build、vet、staticcheck、可选
 
 Jobs：`Lint`（ruff check/format；项目锁了 ruff 就用项目的，否则 `uvx ruff`；可选额外 lint；可选 `uv build` 上传 `dist`）、`Test <python>`（`uv sync`，跑 `test-command`，可选上传 `coverage-python`）。
 
-私有仓库省分钟（opt-in）：`combined: true` 不单独跑 `Lint`，ruff / `lint-command` 在第一个测试 leg（`python-versions` 的第一项）`uv sync` 之后运行，`build-dist` 在该 leg 测试之后运行；`lint-command` 因此能看到测试 job 的 `env`、服务和下载的构件。`test-command` 为空时没有测试 job，`Lint` 照常跑。`actionlint: true` 在做 lint 的 job 里跑 actionlint（同 rust-ci，仅 Linux / macOS），替代单独的 `actionlint.yml` job。
+私有仓库省分钟（opt-in）：`combined: true` 不单独跑 `Lint`，ruff / `lint-command` 在第一个测试 leg（`python-versions` 的第一项）`uv sync` 之后运行，`build-dist` 在该 leg 的 setup-uv 之后、下载构件 / `uv sync` / 测试之前运行（和 `Lint` job 一样从干净的 checkout 打包）；`lint-command` 因此能看到测试 job 的 `env`、服务和下载的构件。`test-command` 为空时没有测试 job，`Lint` 照常跑。`actionlint: true` 在做 lint 的 job 里跑 actionlint（同 rust-ci，仅 Linux / macOS），替代单独的 `actionlint.yml` job。
 
 | input | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -355,7 +355,7 @@ Jobs：`Lint`（ruff check/format；项目锁了 ruff 就用项目的，否则 `
 | `redis-image` | string | `''` | Redis 服务镜像（如 redis:7-alpine），空 = 不启动。测试拿到 CI_REDIS_URL。 |
 | `env` | string | `''` | KEY=VALUE lines. ${CI_POSTGRES_URL} / ${CI_REDIS_URL} are substituted. |
 | `build-dist` | boolean | `false` | Run `uv build` and upload dist/ as artifact `dist` (retention 3 days). |
-| `combined` | boolean | `false` | Run ruff, lint-command and build-dist in the first test leg (the first python-versions entry, after uv sync) instead of a separate Lint job. Saves one job; lint-command then sees the test job's env, services and downloaded artifact. Ignored when test-command is empty (the Lint job runs as usual). |
+| `combined` | boolean | `false` | Run ruff, lint-command and build-dist in the first test leg (the first python-versions entry; build-dist right after setup-uv on the clean checkout, ruff and lint-command after uv sync) instead of a separate Lint job. Saves one job; lint-command then sees the test job's env, services and downloaded artifact. Ignored when test-command is empty (the Lint job runs as usual). |
 | `actionlint` | boolean | `false` | Run actionlint (+ shellcheck) on the repository's workflows as a step of the job that lints (Lint, or the first test leg when combined is true) instead of a separate actionlint.yml job. Linux and macOS runners only. |
 | `actionlint-version` | string | `1.7.12` | actionlint release used when actionlint is true (same default as actionlint.yml). |
 | `runs-on` | string | `ubuntu-latest` | Runner 标签。 |

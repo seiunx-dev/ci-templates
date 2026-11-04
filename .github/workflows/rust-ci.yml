@@ -194,9 +194,11 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.lint-timeout-minutes }}
     env: &lint-env
-      # Read by the step conditions shared with the Test job (see `combined`).
-      RUST_CI_LINT: "true"
-      RUST_CI_ACTIONLINT: ${{ inputs.actionlint }}
+      # Read by the step conditions shared with the Test job (see `combined`). Keep the CI_TPL_
+      # prefix: Swatinem/rust-cache hashes every env var starting with CARGO, CC, CFLAGS, CXX,
+      # CMAKE or RUST into its cache key, so a RUST_* name here would change every caller's key.
+      CI_TPL_LINT: "true"
+      CI_TPL_ACTIONLINT: ${{ inputs.actionlint }}
     steps: &lint-steps
       - name: Install base packages (container)
         if: inputs.container != ''
@@ -211,7 +213,7 @@ jobs:
       # not pay a rounded minute for a separate job. Runs from the repository root.
       - &actionlint-install
         name: Install actionlint
-        if: env.RUST_CI_ACTIONLINT == 'true'
+        if: env.CI_TPL_ACTIONLINT == 'true'
         shell: bash
         env:
           VERSION: ${{ inputs.actionlint-version }}
@@ -238,7 +240,7 @@ jobs:
           echo "$dir" >> "$GITHUB_PATH"
       - &actionlint-run
         name: actionlint
-        if: env.RUST_CI_ACTIONLINT == 'true'
+        if: env.CI_TPL_ACTIONLINT == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -289,7 +291,7 @@ jobs:
         run: ${{ inputs.setup-command }}
       - &fmt-step
         name: cargo fmt --check
-        if: env.RUST_CI_LINT == 'true' && inputs.fmt
+        if: env.CI_TPL_LINT == 'true' && inputs.fmt
         shell: bash
         env:
           MAIN: ${{ inputs.working-directory }}
@@ -301,7 +303,7 @@ jobs:
           done
       - &clippy-step
         name: cargo clippy -D warnings
-        if: env.RUST_CI_LINT == 'true'
+        if: env.CI_TPL_LINT == 'true'
         shell: bash
         env:
           MAIN: ${{ inputs.working-directory }}
@@ -324,7 +326,7 @@ jobs:
           done
       - &extra-lint-step
         name: Extra lint
-        if: env.RUST_CI_LINT == 'true' && inputs.extra-lint-command != ''
+        if: env.CI_TPL_LINT == 'true' && inputs.extra-lint-command != ''
         shell: bash
         working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.extra-lint-command }}
@@ -348,8 +350,9 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.test-timeout-minutes }}
     env: &test-env
-      RUST_CI_LINT: ${{ inputs.combined && inputs.lint }}
-      RUST_CI_ACTIONLINT: ${{ inputs.actionlint && (inputs.combined || !inputs.lint) }}
+      # CI_TPL_ prefix on purpose (not hashed by rust-cache, see the Lint job).
+      CI_TPL_LINT: ${{ inputs.combined && inputs.lint }}
+      CI_TPL_ACTIONLINT: ${{ inputs.actionlint && (inputs.combined || !inputs.lint) }}
     steps: &test-steps
       - name: Install base packages (container)
         if: inputs.container != ''
@@ -409,12 +412,12 @@ jobs:
           # Without combined these evaluate exactly as before: '' / llvm-tools-preview and
           # <prefix>-test / <prefix>-coverage.
           components: >-
-            ${{ env.RUST_CI_LINT == 'true'
+            ${{ env.CI_TPL_LINT == 'true'
             && (inputs.coverage && 'rustfmt,clippy,llvm-tools-preview' || 'rustfmt,clippy')
             || (inputs.coverage && 'llvm-tools-preview' || '') }}
           targets: ${{ inputs.targets }}
           working-directory: ${{ inputs.working-directory }}
-          cache-key: ${{ inputs.cache-key-prefix }}-${{ env.RUST_CI_LINT == 'true' && 'combined-' || '' }}${{ inputs.coverage && 'coverage' || 'test' }}
+          cache-key: ${{ inputs.cache-key-prefix }}-${{ env.CI_TPL_LINT == 'true' && 'combined-' || '' }}${{ inputs.coverage && 'coverage' || 'test' }}
           cache-workspaces: ${{ steps.ws.outputs.list }}
       - name: Install cargo-llvm-cov
         if: inputs.coverage
