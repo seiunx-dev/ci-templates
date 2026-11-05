@@ -2,9 +2,16 @@
 # go mod tidy -diff, optional govulncheck, go build) and `test` (go test -race, optional
 # coverage + threshold, optional Postgres/Redis), plus an optional bun frontend job.
 #
-# Go caches are keyed per job and per commit with go.sum-scoped restore keys, and saved
-# only from the default branch, so GOCACHE is refreshed on every main push instead of
-# freezing at the first go.sum hit (the setup-go default).
+# Caches are saved only from the default branch (PRs and tags restore, never write):
+# - GOMODCACHE: one entry per go.sum hash, shared by both jobs and saved by Lint when the exact
+#   key missed. On the default branch a miss starts empty (no restore-keys fallback), so an
+#   entry never carries the module versions of older go.sum files.
+# - GOCACHE (Lint: also staticcheck's cache): per job, calling workflow file and
+#   working-directory, keyed per commit with go.sum-scoped restore keys, so it is refreshed on
+#   every main push instead of freezing at the first go.sum hit (the setup-go default). Before
+#   the save, the entries this run did not use are deleted ("Mark" / "Trim" steps), so an entry
+#   holds one build's working set instead of growing with every commit.
+# An exact hit (a re-run) saves nothing.
 #
 # The Go version comes from go.mod: its toolchain line when there is one, else the go line.
 # setup-go then exports GOTOOLCHAIN=local, so a go.mod newer than the installed toolchain fails
@@ -117,19 +124,59 @@ jobs:
           cache: false
       - name: Go cache paths
         id: paths
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKDIR: ${{ inputs.working-directory }}
         run: |
           echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
           echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
-      - name: Restore Go cache
+          # staticcheck keeps its own cache in os.UserCacheDir()/staticcheck unless STATICCHECK_CACHE is set.
+          case "$(uname -s)" in Darwin) base="$HOME/Library/Caches" ;; *) base="${XDG_CACHE_HOME:-$HOME/.cache}" ;; esac
+          echo "staticcheck=${STATICCHECK_CACHE:-$base/staticcheck}" >> "$GITHUB_OUTPUT"
+          # Build caches are split per calling workflow file (the caller's ci.yml vs integration.yml)
+          # and working-directory: a trimmed entry holds only what its own kind of run used.
+          wf="${WORKFLOW_REF%%@*}"; wf="${wf##*/}"; wf="${wf%.*}"
+          echo "scope=$(printf '%s-%s' "$wf" "$WORKDIR" | tr -c 'A-Za-z0-9._-' '_')" >> "$GITHUB_OUTPUT"
+      - name: Restore Go module cache
+        id: mod-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.paths.outputs.mod }}
+          key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) && format('go-mod-{0}-', runner.os) || '' }}
+      - name: Restore Go build cache
+        id: build-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ${{ steps.paths.outputs.mod }}
             ${{ steps.paths.outputs.build }}
-          key: go-lint-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+            ${{ steps.paths.outputs.staticcheck }}
+          key: go-lint-${{ runner.os }}-${{ steps.paths.outputs.scope }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
           restore-keys: |
-            go-lint-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
-            go-lint-${{ runner.os }}-
+            go-lint-${{ runner.os }}-${{ steps.paths.outputs.scope }}-${{ hashFiles('**/go.sum') }}-
+            go-lint-${{ runner.os }}-${{ steps.paths.outputs.scope }}-
+      - name: Mark Go build cache
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.build-cache.outputs.cache-hit != 'true'
+        env:
+          DIRS: |
+            ${{ steps.paths.outputs.build }}
+            ${{ steps.paths.outputs.staticcheck }}
+        run: |
+          # Go and staticcheck refresh an entry's mtime on use only when it is at least an hour
+          # old, so the entries of a cache saved less than an hour ago would look unused. Age every
+          # restored entry to two hours ago (far from their own 6-day trim cutoff), then set the
+          # marker: at save time, an entry newer than the marker was used or written by this run.
+          set -euo pipefail
+          shopt -s nullglob
+          old=$(( $(date +%s) - 7200 ))
+          stamp=$(date -u -d "@$old" +%Y%m%d%H%M.%S 2>/dev/null || date -u -r "$old" +%Y%m%d%H%M.%S)
+          TZ=UTC0 touch -t "$stamp" "$RUNNER_TEMP/go-cache-aged"
+          while IFS= read -r dir; do
+            sub=("${dir%/}"/[0-9a-f][0-9a-f])
+            [ "${#sub[@]}" -gt 0 ] || continue
+            find "${sub[@]}" -mindepth 1 -maxdepth 1 -name '*-[ad]' -exec touch -c -r "$RUNNER_TEMP/go-cache-aged" {} +
+          done <<< "$DIRS"
+          touch "$RUNNER_TEMP/go-cache-marker"
       - name: gofmt
         run: |
           # shellcheck disable=SC2046
@@ -171,14 +218,46 @@ jobs:
       - name: govulncheck
         if: inputs.govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-      - name: Save Go cache
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      - name: Trim Go build cache
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.build-cache.outputs.cache-hit != 'true'
+        env:
+          DIRS: |
+            ${{ steps.paths.outputs.build }}
+            ${{ steps.paths.outputs.staticcheck }}
+        run: |
+          # Delete the entries (<hash>-a action entries, <hash>-d outputs) this run did not use.
+          # Go does not touch an output it stores again unchanged, so the outputs that a kept
+          # action entry ("v1 <action> <output> ...") points at are kept as well.
+          set -euo pipefail
+          shopt -s nullglob
+          export LC_ALL=C
+          marker="$RUNNER_TEMP/go-cache-marker" keep="$RUNNER_TEMP/go-cache-keep"
+          while IFS= read -r dir; do
+            dir="${dir%/}"
+            sub=("$dir"/[0-9a-f][0-9a-f])
+            [ "${#sub[@]}" -gt 0 ] || continue
+            before=$(du -sk "$dir" | cut -f1)
+            find "${sub[@]}" -mindepth 1 -maxdepth 1 -type f -name '*-a' -newer "$marker" -exec cat {} + \
+              | awk -v d="$dir" '$1 == "v1" && NF >= 3 { print d "/" substr($3, 1, 2) "/" $3 "-d" }' \
+              | sort -u > "$keep"
+            find "${sub[@]}" -mindepth 1 -maxdepth 1 -name '*-[ad]' ! -newer "$marker" | sort \
+              | comm -23 - "$keep" | tr '\n' '\0' | xargs -0 rm -rf --
+            echo "$dir: ${before} KiB -> $(du -sk "$dir" | cut -f1) KiB"
+          done <<< "$DIRS"
+      - name: Save Go build cache
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.build-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ${{ steps.paths.outputs.mod }}
             ${{ steps.paths.outputs.build }}
-          key: go-lint-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+            ${{ steps.paths.outputs.staticcheck }}
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
+      - name: Save Go module cache
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.mod-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.paths.outputs.mod }}
+          key: ${{ steps.mod-cache.outputs.cache-primary-key }}
 
   test:
     name: Test
@@ -216,19 +295,50 @@ jobs:
           cache: false
       - name: Go cache paths
         id: paths
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKDIR: ${{ inputs.working-directory }}
         run: |
           echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
           echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
-      - name: Restore Go cache
+          wf="${WORKFLOW_REF%%@*}"; wf="${wf##*/}"; wf="${wf%.*}"
+          echo "scope=$(printf '%s-%s' "$wf" "$WORKDIR" | tr -c 'A-Za-z0-9._-' '_')" >> "$GITHUB_OUTPUT"
+      - name: Restore Go module cache
+        id: mod-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ${{ steps.paths.outputs.mod }}
-            ${{ steps.paths.outputs.build }}
-          key: go-test-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+          path: ${{ steps.paths.outputs.mod }}
+          key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) && format('go-mod-{0}-', runner.os) || '' }}
+      - name: Restore Go build cache
+        id: build-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.paths.outputs.build }}
+          key: go-test-${{ runner.os }}-${{ steps.paths.outputs.scope }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
           restore-keys: |
-            go-test-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
-            go-test-${{ runner.os }}-
+            go-test-${{ runner.os }}-${{ steps.paths.outputs.scope }}-${{ hashFiles('**/go.sum') }}-
+            go-test-${{ runner.os }}-${{ steps.paths.outputs.scope }}-
+      - name: Mark Go build cache
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.build-cache.outputs.cache-hit != 'true'
+        env:
+          DIRS: ${{ steps.paths.outputs.build }}
+        run: |
+          # Go and staticcheck refresh an entry's mtime on use only when it is at least an hour
+          # old, so the entries of a cache saved less than an hour ago would look unused. Age every
+          # restored entry to two hours ago (far from their own 6-day trim cutoff), then set the
+          # marker: at save time, an entry newer than the marker was used or written by this run.
+          set -euo pipefail
+          shopt -s nullglob
+          old=$(( $(date +%s) - 7200 ))
+          stamp=$(date -u -d "@$old" +%Y%m%d%H%M.%S 2>/dev/null || date -u -r "$old" +%Y%m%d%H%M.%S)
+          TZ=UTC0 touch -t "$stamp" "$RUNNER_TEMP/go-cache-aged"
+          while IFS= read -r dir; do
+            sub=("${dir%/}"/[0-9a-f][0-9a-f])
+            [ "${#sub[@]}" -gt 0 ] || continue
+            find "${sub[@]}" -mindepth 1 -maxdepth 1 -name '*-[ad]' -exec touch -c -r "$RUNNER_TEMP/go-cache-aged" {} +
+          done <<< "$DIRS"
+          touch "$RUNNER_TEMP/go-cache-marker"
       - name: Export env and service URLs
         env:
           LINES: ${{ inputs.env }}
@@ -263,6 +373,26 @@ jobs:
           fi
           # shellcheck disable=SC2086
           go test $FLAGS "${extra[@]}" $ARGS $PKGS
+      - name: Merge repeated coverage blocks
+        if: inputs.coverage && inputs.coverpkg-exclude != ''
+        run: |
+          # With -coverpkg every test binary reports every listed package, so go.out repeats each
+          # block once per tested package. Write each block once (first-seen order) with the counts
+          # summed (OR in set mode): go tool cover merges repeats the same way when it reads the
+          # profile, and Sonar marks a line covered when any block on it has a count > 0, so both
+          # totals stay the same. On an unexpected line the profile is left as it is.
+          f="$GITHUB_WORKSPACE/coverage/go.out"
+          if awk 'NR == 1 { if ($0 !~ /^mode: /) exit 1; set = ($0 == "mode: set"); print; next }
+                  NF == 0 { next }
+                  NF != 3 || $3 !~ /^[0-9]+$/ { exit 1 }
+                  { k = $1 " " $2; if (!(k in n)) { o[++c] = k; n[k] = 0 }
+                    n[k] = set ? (n[k] + $3 > 0) : n[k] + $3 }
+                  END { for (i = 1; i <= c; i++) printf "%s %.0f\n", o[i], n[o[i]] }' "$f" > "$f.merged"; then
+            echo "go.out: $(wc -l < "$f") -> $(wc -l < "$f.merged") lines"
+            mv "$f.merged" "$f"
+          else
+            rm -f "$f.merged"; echo "::warning::coverage/go.out has an unexpected line; left unmerged"
+          fi
       - name: Coverage threshold
         if: inputs.coverage && inputs.coverage-threshold != ''
         env:
@@ -279,14 +409,36 @@ jobs:
           path: coverage/
           retention-days: 3
           if-no-files-found: error
-      - name: Save Go cache
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      - name: Trim Go build cache
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.build-cache.outputs.cache-hit != 'true'
+        env:
+          DIRS: ${{ steps.paths.outputs.build }}
+        run: |
+          # Delete the entries (<hash>-a action entries, <hash>-d outputs) this run did not use.
+          # Go does not touch an output it stores again unchanged, so the outputs that a kept
+          # action entry ("v1 <action> <output> ...") points at are kept as well.
+          set -euo pipefail
+          shopt -s nullglob
+          export LC_ALL=C
+          marker="$RUNNER_TEMP/go-cache-marker" keep="$RUNNER_TEMP/go-cache-keep"
+          while IFS= read -r dir; do
+            dir="${dir%/}"
+            sub=("$dir"/[0-9a-f][0-9a-f])
+            [ "${#sub[@]}" -gt 0 ] || continue
+            before=$(du -sk "$dir" | cut -f1)
+            find "${sub[@]}" -mindepth 1 -maxdepth 1 -type f -name '*-a' -newer "$marker" -exec cat {} + \
+              | awk -v d="$dir" '$1 == "v1" && NF >= 3 { print d "/" substr($3, 1, 2) "/" $3 "-d" }' \
+              | sort -u > "$keep"
+            find "${sub[@]}" -mindepth 1 -maxdepth 1 -name '*-[ad]' ! -newer "$marker" | sort \
+              | comm -23 - "$keep" | tr '\n' '\0' | xargs -0 rm -rf --
+            echo "$dir: ${before} KiB -> $(du -sk "$dir" | cut -f1) KiB"
+          done <<< "$DIRS"
+      - name: Save Go build cache
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.build-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ${{ steps.paths.outputs.mod }}
-            ${{ steps.paths.outputs.build }}
-          key: go-test-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+          path: ${{ steps.paths.outputs.build }}
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
 
   frontend:
     name: Frontend

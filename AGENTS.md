@@ -15,7 +15,7 @@
 | `.github/workflows/*.yml` | 可复用工作流（每个文件开头的注释说明用法），以及 `self-test.yml`（工作流名 `CI`） |
 | `actions/<name>/action.yml` | composite action：`setup-rust`、`apt-install`、`verify-version`、`wait-for-checks`、`package-archive`、`cargo-publish` |
 | `tools/check_callers.py` | 静态检查：YAML 语法、调用方 inputs/secrets 与声明是否一致、每个 job 有 `timeout-minutes`、第三方 action pin 到完整 SHA；也能检查别的仓库的调用文件 |
-| `tests/*_test.{py,sh}` | 从工作流 / action 文件里取出 `run:` 脚本直接运行的单元测试（`sonar.yml` 参数构建、`docker-retag.yml` 顺序保护、`verify-version`），以及 `maturin_test_guard_test.py`（`maturin-wheels.yml` 的 `test` 条件；禁止表达式与裸 `true` / `false` 比较） |
+| `tests/*_test.{py,sh}` | 从工作流 / action 文件里取出 `run:` 脚本直接运行的单元测试（`sonar.yml` 参数构建、`docker-retag.yml` 顺序保护、`verify-version`），`maturin_test_guard_test.py`（`maturin-wheels.yml` 的 `test` 条件；禁止表达式与裸 `true` / `false` 比较），以及 `go_cache_test.sh`（`go-ci.yml` 构建缓存的 Mark / Trim 和 `-coverpkg` 覆盖率合并，需要本机有 Go） |
 | `tests/fixtures/` | 自测用的最小 Rust / Python / Go / npm / bun / Docker 项目 |
 | `CHANGELOG.md` | 每个 `v1.x.y` 一节 |
 
@@ -29,6 +29,7 @@ python3 tests/sonar_args_test.py
 python3 tests/maturin_test_guard_test.py
 bash tests/docker_retag_test.sh
 bash tests/verify_version_test.sh
+bash tests/go_cache_test.sh   # 需要 Go（自测里由 setup-go 按 go-min fixture 安装）
 ```
 
 actionlint + shellcheck 在 CI 里由 `actionlint.yml` 跑（版本见该文件的 `actionlint-version` 默认值）。各模板在 fixture 上的实际运行只能在 GitHub 上看。
