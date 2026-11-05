@@ -15,19 +15,20 @@
 | `.github/workflows/*.yml` | 可复用工作流（每个文件开头的注释说明用法），以及 `self-test.yml`（工作流名 `CI`） |
 | `actions/<name>/action.yml` | composite action：`setup-rust`、`apt-install`、`verify-version`、`wait-for-checks`、`package-archive`、`cargo-publish` |
 | `tools/check_callers.py` | 静态检查：YAML 语法、调用方 inputs/secrets 与声明是否一致、每个 job 有 `timeout-minutes`、第三方 action pin 到完整 SHA；也能检查别的仓库的调用文件 |
-| `tests/*_test.{py,sh}` | 从工作流 / action 文件里取出 `run:` 脚本直接运行的单元测试（`sonar.yml` 参数构建、`docker-retag.yml` 顺序保护、`verify-version`、`node-ci.yml` 的 `e2e-paths` diff、`wait-for-checks`），`maturin_test_guard_test.py`（`maturin-wheels.yml` 的 `test` 条件；禁止表达式与裸 `true` / `false` 比较），以及 `go_cache_test.sh`（`go-ci.yml` 构建缓存的 Mark / Trim 和 `-coverpkg` 覆盖率合并，需要本机有 Go） |
+| `tests/*_test.{py,sh}` | 从工作流 / action 文件里取出 `run:` 脚本直接运行的单元测试（`sonar.yml` 参数构建、`docker-retag.yml` 顺序保护、`verify-version`、`node-ci.yml` 的 `e2e-paths` diff、`wait-for-checks`、`apt-install` 重试与超时），`maturin_test_guard_test.py`（`maturin-wheels.yml` 的 `test` 条件；禁止表达式与裸 `true` / `false` 比较），以及 `go_cache_test.sh`（`go-ci.yml` 构建缓存的 Mark / Trim 和 `-coverpkg` 覆盖率合并，需要本机有 Go） |
 | `tests/fixtures/` | 自测用的最小 Rust / Python / Go / npm / bun / Docker 项目 |
 | `CHANGELOG.md` | 每个 `v1.x.y` 一节 |
 
 ## 本地检查
 
-和 `self-test.yml` 的 `yaml` job 跑的是同一组命令（需要 PyYAML）：
+和 `self-test.yml` 的 `yaml` job 跑的是同一组命令（需要 PyYAML；`apt_install_test.sh` 还需要 GNU `timeout`，macOS 上装 coreutils）：
 
 ```sh
 python3 tools/check_callers.py
 python3 tests/sonar_args_test.py
 python3 tests/maturin_test_guard_test.py
 bash tests/docker_retag_test.sh
+bash tests/apt_install_test.sh
 bash tests/verify_version_test.sh
 bash tests/node_e2e_paths_test.sh
 bash tests/wait_for_checks_test.sh
@@ -45,6 +46,7 @@ actionlint + shellcheck 在 CI 里由 `actionlint.yml` 跑（版本见该文件�
 - **私有调用方按 job 计费**（每个 job 向上取整到分钟）：省 job 的选项（`combined`、`actionlint`）一律 opt-in、默认不改 job 结构和 job 名；rust-ci / python-uv-ci 里 Lint 和 Test 共用的步骤通过 YAML alias 复用，是否执行由 job 级 env（`CI_TPL_LINT` / `CI_TPL_ACTIONLINT`）决定，改这些步骤时两个 job 同时生效。这些 env 名**不能以 `CARGO`、`CC`、`CFLAGS`、`CXX`、`CMAKE`、`RUST` 开头**：Swatinem/rust-cache 会把这些前缀的非空 env 算进缓存 key，job 级 env 一改名就让所有调用方的缓存全部失效。
 - 可复用工作流内部**不定义 `concurrency`**：被调用时 `github.workflow` 是调用方的名字，会和调用方的 group 撞上。
 - 模板内部引用 composite action 用的是 `seiunx-dev/ci-templates/actions/<name>@v1`，所以自测跑不到本次对 `actions/` 的修改，要按 README“发布本仓库”第 3 步先移 `v1` 再手动跑 `CI` 验证。
+- **自测的触发**：`self-test.yml` 的 push 触发带 `paths-ignore`（`**.md`、`LICENSE`），只改文档的 main commit 不跑 CI；`pull_request` 和 `workflow_dispatch` 不要加路径过滤，`CI OK` 是 required check，整个工作流被跳过时它会一直 pending。新增的 fixture 或测试如果读 Markdown 文件，要同步改这个过滤。移 `v1` 后的手动 `CI`（README“发布本仓库”第 3 步）仍然必须跑：`v1` 指向的 CHANGELOG commit 自己不会触发 push run。
 - **加覆盖**：新行为尽量在 `self-test.yml` 里用 fixture 调一次，或者在 `tests/` 里加脚本测试，并把新 job 加进 `ci-ok` 的 `needs`。自测不跑 `gh-release.yml`、`maturin-wheels.yml`、`go-release.yml` 和 docker 的 promote 路径。
 
 ## 提交与发布

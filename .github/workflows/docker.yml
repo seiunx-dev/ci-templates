@@ -23,8 +23,9 @@
 # overwrite each other) or `registry` (<image>:buildcache, recommended for heavy Rust
 # images since it does not count against the 10 GB Actions cache quota).
 #
-# Build records: build-push-action uploads one .dockerbuild artifact per build (3 days);
-# `build-record: false` turns that off for private repos that pay for artifact storage.
+# Build records: build-push-action uploads one .dockerbuild artifact per build (3 days) in
+# public repos. Private repos pay for artifact storage, so there the default is off;
+# `build-record: true` / `false` overrides that either way.
 #
 # Caller job permissions: contents: read, packages: write, pull-requests: read
 # (packages: write is never used on pull_request runs: they only read the registry cache;
@@ -111,10 +112,11 @@ on:
       build-record:
         description: >-
           Upload the build record artifact (<owner>~<repo>~<id>.dockerbuild, kept 3 days).
-          false skips it: private repos pay for artifact storage, and once the account's quota
-          is full every upload-artifact step in every workflow of the account fails.
+          Default: true in public repos, false in private ones (they pay for artifact storage,
+          and once the account's quota is full every upload-artifact step in every workflow of
+          the account fails). Only Docker Desktop's build history reads it.
         type: boolean
-        default: true
+        default: ${{ !github.event.repository.private }}
       artifact-name:
         description: Same-run workflow artifact to download before the build (e.g. prebuilt binaries). Supports a glob pattern.
         type: string

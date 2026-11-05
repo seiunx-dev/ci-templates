@@ -4,6 +4,13 @@ inputs:
   packages:
     description: Space- or newline-separated package list.
     default: ""
+  attempt-timeout:
+    description: >-
+      Seconds each network phase of an attempt (`apt-get update`, then downloading the packages)
+      may take before it is killed and the attempt retried; 0 = no limit. Unpacking runs from the
+      downloaded files and is never killed (an interrupted dpkg would leave the system half
+      configured).
+    default: "180"
 runs:
   using: composite
   steps:
@@ -12,18 +19,29 @@ runs:
       shell: bash
       env:
         PACKAGES: ${{ inputs.packages }}
+        ATTEMPT_TIMEOUT: ${{ inputs.attempt-timeout }}
         DEBIAN_FRONTEND: noninteractive
       run: |
         set -euo pipefail
+        [[ "$ATTEMPT_TIMEOUT" =~ ^[0-9]+$ ]] || { echo "::error::attempt-timeout must be a whole number of seconds, got '$ATTEMPT_TIMEOUT'"; exit 1; }
         SUDO=""
         if [ "$(id -u)" != 0 ]; then SUDO=sudo; fi
         read -r -a pkgs <<< "$(echo "$PACKAGES" | tr '\n' ' ')"
         [ "${#pkgs[@]}" -gt 0 ] || exit 0
+        # A stalled mirror fails fast instead of trickling for minutes: per-request timeouts and
+        # retries on every apt call, plus a wall-clock limit on the two network phases.
+        apt=(apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+        limit=()
+        if [ "$ATTEMPT_TIMEOUT" != 0 ]; then limit=(timeout -k 10 "$ATTEMPT_TIMEOUT"); fi
         for attempt in 1 2 3; do
-          if $SUDO apt-get update -qq && $SUDO apt-get install -y -qq --no-install-recommends "${pkgs[@]}"; then
+          if $SUDO ${limit[@]+"${limit[@]}"} "${apt[@]}" update -qq \
+            && $SUDO ${limit[@]+"${limit[@]}"} "${apt[@]}" install -y -qq --no-install-recommends --download-only "${pkgs[@]}" \
+            && $SUDO "${apt[@]}" install -y -qq --no-install-recommends "${pkgs[@]}"; then
             exit 0
           fi
-          echo "::warning::apt-get failed (attempt $attempt), retrying"
+          if [ "$attempt" = 3 ]; then break; fi
+          echo "::warning::apt-get failed or timed out (attempt $attempt), retrying"
           sleep $((attempt * 10))
         done
+        echo "::error::apt-get failed or timed out 3 times"
         exit 1
