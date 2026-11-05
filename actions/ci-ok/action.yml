@@ -1,0 +1,80 @@
+name: CI OK
+description: >-
+  Body of a caller's aggregate "CI OK" job. Fails when a needed job failed or was cancelled, and
+  also when any other job of this run has already finished as failure, cancelled, timed out,
+  startup failure or action required. The second check closes a gap in
+  `contains(needs.*.result, 'cancelled')`: when GitHub cancels a job inside a reusable workflow
+  because no runner picked it up ("The job was not acquired by Runner"), the calling job's
+  needs.<id>.result can still say success, so "CI OK" went green without that leg having run.
+  Skipped jobs pass. Jobs that have not finished yet (the CI OK job itself, jobs that need it)
+  are not looked at. Needs `actions: read` on the CI OK job.
+inputs:
+  needs:
+    description: The needs context of the CI OK job as JSON (the expression toJSON(needs)).
+    required: true
+  ignore-jobs:
+    description: >-
+      Job names (as shown in the checks list, e.g. "Rust / MSRV"), one per line, whose failure or
+      cancellation does not fail CI OK; bash patterns, `*` matches across " / ". Only the run-wide
+      check honours it: a needed job that failed or was cancelled always fails CI OK.
+    default: ""
+  token:
+    description: Token with actions:read.
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - name: Check needed jobs and every finished job of this run
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        NEEDS: ${{ inputs.needs }}
+        IGNORE: ${{ inputs.ignore-jobs }}
+      run: |
+        set -uo pipefail
+        fail=0
+        if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$NEEDS"; then
+          echo "::error::input 'needs' is not the JSON of the needs context; pass the expression toJSON(needs)"
+          exit 1
+        fi
+        while IFS=$'\t' read -r job result; do
+          [ -n "$job" ] || continue
+          case "$result" in
+            failure|cancelled) echo "::error::needed job '$job' finished as $result"; fail=1 ;;
+          esac
+        done < <(jq -r 'to_entries[] | [.key, (.value.result // "")] | @tsv' <<<"$NEEDS")
+
+        # needs.*.result alone can miss a cancelled leg of a reusable workflow, so also read the
+        # conclusions GitHub shows for this run (latest attempt of each job).
+        err=$(mktemp)
+        tries=0
+        until jobs=$(gh api --paginate \
+                       "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
+                       --jq '.jobs[] | select(.status == "completed") | [.name, .conclusion] | @tsv' 2>"$err"); do
+          tries=$((tries + 1))
+          if [ "$tries" -ge 3 ]; then
+            echo "::error::could not list the jobs of this run ($(head -c 300 "$err")). Give the CI OK job 'permissions: actions: read'."
+            exit 1
+          fi
+          echo "jobs API error; retry $tries/2 in 5s"; sleep 5
+        done
+        while IFS=$'\t' read -r name concl; do
+          [ -n "$name" ] || continue
+          case "$concl" in
+            failure|cancelled|timed_out|startup_failure|action_required) ;;
+            *) continue ;;
+          esac
+          ignored=false
+          while IFS= read -r pat; do
+            pat="${pat#"${pat%%[![:space:]]*}"}"; pat="${pat%"${pat##*[![:space:]]}"}"
+            # shellcheck disable=SC2053 # the pattern is meant to glob
+            if [ -n "$pat" ] && [[ $name == $pat ]]; then ignored=true; break; fi
+          done <<<"$IGNORE"
+          if [ "$ignored" = true ]; then
+            echo "::notice::job '$name' finished as $concl (ignored by ignore-jobs)"
+          else
+            echo "::error::job '$name' in this run finished as $concl"; fail=1
+          fi
+        done <<<"$jobs"
+        [ "$fail" = 0 ] && echo "All needed jobs passed or were skipped, and no job of this run failed or was cancelled."
+        exit "$fail"
