@@ -1,6 +1,6 @@
 # ci-templates
 
-Team-Haruki / MejiroRina / seiunx-dev 共用的 GitHub Actions 模板：14 个可复用工作流（`on: workflow_call`）加 6 个 composite action。各仓库只保留很薄的调用文件（`ci.yml`、`release.yml`，文档站是 `docs.yml`），构建逻辑都在这里维护，改一处，所有仓库一起生效。
+Team-Haruki / MejiroRina / seiunx-dev 共用的 GitHub Actions 模板：14 个可复用工作流（`on: workflow_call`）加 7 个 composite action。各仓库只保留很薄的调用文件（`ci.yml`、`release.yml`，文档站是 `docs.yml`），构建逻辑都在这里维护，改一处，所有仓库一起生效。
 
 Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-templates/.github/workflows/<name>.yml@v1`.
 
@@ -29,6 +29,7 @@ Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-te
 | `actions/apt-install` | apt 安装，带重试和联网阶段超时（镜像卡住时杀掉重试）；在 runner 上用 sudo，在容器里不用 |
 | `actions/verify-version` | 从 tag 或 manifest 解析版本并校验两者一致 |
 | `actions/wait-for-checks` | 等待某个 commit 上的指定 check 完成并确认成功 |
+| `actions/ci-ok` | 调用方 `CI OK` 聚合 job 的检查：needs 里有 failure / cancelled，或本次 run 里已结束的 job 有 failure / cancelled / timed out 时失败 |
 | `actions/package-archive` | 跨平台打包（Linux / macOS / Windows） |
 | `actions/cargo-publish` | 按顺序发布 crate，已发布的跳过，并等 index 可见后再发下一个 |
 | `tools/check_callers.py` | 静态检查：YAML 语法、调用方传的 inputs/secrets 与模板声明是否对得上、每个 job 是否有 timeout、第三方 action 是否 pin 到 SHA |
@@ -38,6 +39,7 @@ Shared reusable GitHub Actions workflows. Call them with `uses: seiunx-dev/ci-te
 | `tests/apt_install_test.sh` | `actions/apt-install` 重试和超时的测试（取 action 里的脚本，桩掉 apt-get；需要 GNU `timeout`） |
 | `tests/verify_version_test.sh` | `actions/verify-version` 的事件 / ref 组合测试（只有 tag push 时 `is-tag=true`），以及 `go` / `none` 版本来源 |
 | `tests/wait_for_checks_test.sh` | `actions/wait-for-checks` 的测试（取 action 里的脚本，桩掉 gh / sleep）：只有 `completed success` 放行；`timeout-minutes: 0` 只查一次 |
+| `tests/ci_ok_test.sh` | `actions/ci-ok` 的测试（取 action 里的脚本，桩掉 gh / sleep）：needs 看起来全绿、但 run 里有 cancelled / timed out / failure 的 job 时也失败 |
 
 ## 怎么调用
 
@@ -92,9 +94,13 @@ jobs:
     needs: [rust, sonar, docker]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      actions: read        # actions/ci-ok 读本次 run 的 job 列表（私有仓库必需）
     steps:
-      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
-        run: exit 1
+      # 不只看 needs.*.result：可复用工作流里因为没有 runner 被取消的 leg，needs 可能仍是 success
+      - uses: seiunx-dev/ci-templates/actions/ci-ok@v1
+        with:
+          needs: ${{ toJSON(needs) }}
 
   docker-tags:
     name: Docker tags      # CI OK 通过后才把 :main 移到这次的镜像，不重建
@@ -180,7 +186,7 @@ jobs:
   done
   git tag -a v1.2.3 "$sha" -m v1.2.3 && git push origin v1.2.3
   ```
-- **唯一的 required check 是 `CI OK`**：它是 `ci-ok` 聚合 job，`needs` 其余所有 job；有 job failure 或 cancelled 就失败，skipped 视为通过。
+- **唯一的 required check 是 `CI OK`**：它是 `ci-ok` 聚合 job，`needs` 其余所有 job；有 job failure 或 cancelled 就失败，skipped 视为通过。用 `actions/ci-ok`（v1.1.13 起）而不是只写 `contains(needs.*.result, ...)`：可复用工作流里的 job 因为没有 runner 接（"The job was not acquired by Runner"）被取消时，调用方 job 的 `needs.<id>.result` 可能仍是 `success`，只判断 needs 的 `CI OK` 会在这个 leg 根本没跑的情况下变绿（本仓库自测的 macOS leg 出现过）。`actions/ci-ok` 另外从 jobs API 读本次 run 每个已结束 job 的结论，需要 `CI OK` job 有 `actions: read`。
 - **concurrency**：PR 用 `${workflow}-pr-<PR号>` 并 cancel-in-progress；其他事件用 `${workflow}-<事件>-<sha>`，每个 commit 一组。不能用 `ref` 分组：同组里排队中的 run 会被更新的 run 顶掉（即使 cancel-in-progress 是 false），连续 push 三次时中间那个 commit 就没有 "CI OK" 和 `:sha-<sha>` 镜像，给它打 tag 会让 gate 失败。Release 用 `release-${ref}`，从不取消。可复用工作流内部不定义 concurrency：被调用的工作流里 `github.workflow` 取到的是调用方的名字，自己再定义会和调用方的 group 撞上导致死锁。
 - **权限**：顶层 `contents: read`。只有需要写权限的 job 才提权：Docker job 给 `packages: write`（PR 上不推送；`cache-backend: registry` 时 PR 只登录读取 `:buildcache`），发布 job 给 `contents: write`，PyPI/npm 发布 job 给 `id-token: write`，gate job 给 `checks: read`。
 - **每个 job 都有 timeout-minutes**：检查类 15–20 分钟，覆盖率 30，Docker 45，Release 构建 45–60，发布 10。
@@ -228,7 +234,7 @@ jobs:
   - rust-release：cargo（linux/macOS/Windows）+ zigbuild（glibc 2.17），随后检查产物文件名、tar.gz/zip、dir/flat 布局、额外文件和 glibc 符号版本；
   - docker：PR 上构建 amd64 + arm64（不推送；用 registry 缓存，覆盖只读登录和 pr-paths 过滤）；PR 的 docker job 设 `build-record: false`、push 的 docker job 用默认值（本仓库 public，即上传），随后检查 PR run 没有、push / dispatch run 有 `.dockerbuild` 构件；push main 和 workflow_dispatch 时走 `defer-moving-tags` 推送路径，镜像是一次性的 `ghcr.io/seiunx-dev/ci-templates-selftest`：先检查 `:sha-*` 已推、分支 tag 没动，过一个替身 "CI OK" job，再用 `docker-retag.yml` 移分支 tag，最后检查分支 tag 指向同一个 digest（没有重建）；pages：只构建（`deploy: false`）。
   - sonar：`tests/sonar_args_test.py` 单元测试参数构建（multicriteria 合并、properties 语法、`project-version: auto`、report paths）。
-- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖；`verify-version` 的事件 / ref 组合（只有 tag push 发布）由 `tests/verify_version_test.sh` 覆盖；`wait-for-checks` 的放行条件（只有 `completed success`）和 `timeout-minutes: 0` 只查一次（只重试 API 错误，最多 3 次）由 `tests/wait_for_checks_test.sh` 用桩掉的 gh 覆盖；`actions/apt-install` 的重试、网络阶段超时（卡住的 update / 下载被杀掉重试，解包不受限）由 `tests/apt_install_test.sh` 用桩掉的 apt-get 覆盖。node-ci `e2e-paths` 的 diff（PR merge commit、多提交 push、各种照跑的情况）由 `tests/node_e2e_paths_test.sh` 在临时 git 仓库里覆盖，它也检查两个 E2E 变体的步骤相同。`maturin-wheels.yml` 冒烟测试的 `test` 条件由 `maturin-test-guard` job 在 GitHub 上对 `test` 缺省 / false / true 求值，`tests/maturin_test_guard_test.py` 检查两处用的是同一个表达式，并禁止表达式与裸 `true` / `false` 比较（缺省的 key 是 null，null == false）。
+- 不在自测里跑：`gh-release.yml`（会建 release）、`maturin-wheels.yml`（慢，由首个试点仓库覆盖）、`go-release.yml`（需要 go.mod 在仓库根目录）、docker 的 promote 路径。`docker-retag.yml` 的顺序保护（tag 指向更旧 / 更新 / 同一 commit、并发覆盖后重写、关闭检查）由 `tests/docker_retag_test.sh` 用桩掉的 docker / gh 覆盖；`verify-version` 的事件 / ref 组合（只有 tag push 发布）由 `tests/verify_version_test.sh` 覆盖；`wait-for-checks` 的放行条件（只有 `completed success`）和 `timeout-minutes: 0` 只查一次（只重试 API 错误，最多 3 次）由 `tests/wait_for_checks_test.sh` 用桩掉的 gh 覆盖；`actions/ci-ok` 的判定（needs、run 里被取消 / 超时 / 失败的 job、`ignore-jobs`、API 重试）由 `tests/ci_ok_test.sh` 用桩掉的 gh 覆盖，自测自己的 `CI OK` 也用本 commit 的 `./actions/ci-ok`；`actions/apt-install` 的重试、网络阶段超时（卡住的 update / 下载被杀掉重试，解包不受限）由 `tests/apt_install_test.sh` 用桩掉的 apt-get 覆盖。node-ci `e2e-paths` 的 diff（PR merge commit、多提交 push、各种照跑的情况）由 `tests/node_e2e_paths_test.sh` 在临时 git 仓库里覆盖，它也检查两个 E2E 变体的步骤相同。`maturin-wheels.yml` 冒烟测试的 `test` 条件由 `maturin-test-guard` job 在 GitHub 上对 `test` 缺省 / false / true 求值，`tests/maturin_test_guard_test.py` 检查两处用的是同一个表达式，并禁止表达式与裸 `true` / `false` 比较（缺省的 key 是 null，null == false）。
 
 ## 迁移前检查
 
@@ -629,6 +635,16 @@ Publish crates to crates.io in the given order, idempotently: a version that is 
 | `token` | **必填** | crates.io token (secret CARGO_REGISTRY_TOKEN, or the output of rust-lang/crates-io-auth-action). |
 | `dry-run` | `false` | 'true' runs cargo publish --dry-run only. |
 | `index-wait-attempts` | `40` | How many 15 s polls to wait for each crate to appear on the index. |
+
+### `actions/ci-ok` — CI OK
+
+Body of a caller's aggregate "CI OK" job. Fails when a needed job failed or was cancelled, and also when any other job of this run has already finished as failure, cancelled, timed out, startup failure or action required (the jobs API, latest attempt of each job). Skipped and neutral jobs pass; jobs that have not finished (CI OK itself, jobs that need it) are not looked at. The run-wide check closes a gap in `contains(needs.*.result, 'cancelled')`: a job inside a reusable workflow that GitHub cancels because no runner picked it up can leave the calling job's `needs.<id>.result` green. Needs `actions: read` on the CI OK job (private repos; public repos can read the jobs API without it). A failed jobs API call is retried twice, 5 s apart, then CI OK fails.
+
+| input | 默认 | 说明 |
+|---|---|---|
+| `needs` | **必填** | `${{ toJSON(needs) }}` of the CI OK job. |
+| `ignore-jobs` | `''` | Job names as shown in the checks list (e.g. `Rust / MSRV`), one per line, bash patterns (`*` also matches across ` / `), whose failure or cancellation in the run-wide check does not fail CI OK. A needed job that failed or was cancelled always fails. |
+| `token` | `${{ github.token }}` | Token with actions:read. |
 
 ### `actions/package-archive` — Package archive
 

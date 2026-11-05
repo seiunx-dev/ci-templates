@@ -4,7 +4,7 @@
 
 ## 这是什么
 
-共用的 GitHub Actions 模板：`.github/workflows/` 下 14 个可复用工作流（`on: workflow_call`）加 `actions/` 下 6 个 composite action，外加本仓库自己的 CI `self-test.yml`。各仓库用 `seiunx-dev/ci-templates/.github/workflows/<name>.yml@v1` 调用。
+共用的 GitHub Actions 模板：`.github/workflows/` 下 14 个可复用工作流（`on: workflow_call`）加 `actions/` 下 7 个 composite action，外加本仓库自己的 CI `self-test.yml`。各仓库用 `seiunx-dev/ci-templates/.github/workflows/<name>.yml@v1` 调用。
 
 仓库必须保持 **public**：别的 owner 名下的仓库只能调用 public 仓库里的可复用工作流和 action。不要写进任何内部基础设施信息或密钥。
 
@@ -13,9 +13,9 @@
 | 路径 | 内容 |
 |---|---|
 | `.github/workflows/*.yml` | 可复用工作流（每个文件开头的注释说明用法），以及 `self-test.yml`（工作流名 `CI`） |
-| `actions/<name>/action.yml` | composite action：`setup-rust`、`apt-install`、`verify-version`、`wait-for-checks`、`package-archive`、`cargo-publish` |
+| `actions/<name>/action.yml` | composite action：`setup-rust`、`apt-install`、`verify-version`、`wait-for-checks`、`ci-ok`、`package-archive`、`cargo-publish` |
 | `tools/check_callers.py` | 静态检查：YAML 语法、调用方 inputs/secrets 与声明是否一致、每个 job 有 `timeout-minutes`、第三方 action pin 到完整 SHA；也能检查别的仓库的调用文件 |
-| `tests/*_test.{py,sh}` | 从工作流 / action 文件里取出 `run:` 脚本直接运行的单元测试（`sonar.yml` 参数构建、`docker-retag.yml` 顺序保护、`verify-version`、`node-ci.yml` 的 `e2e-paths` diff、`wait-for-checks`、`apt-install` 重试与超时），`maturin_test_guard_test.py`（`maturin-wheels.yml` 的 `test` 条件；禁止表达式与裸 `true` / `false` 比较），以及 `go_cache_test.sh`（`go-ci.yml` 构建缓存的 Mark / Trim 和 `-coverpkg` 覆盖率合并，需要本机有 Go） |
+| `tests/*_test.{py,sh}` | 从工作流 / action 文件里取出 `run:` 脚本直接运行的单元测试（`sonar.yml` 参数构建、`docker-retag.yml` 顺序保护、`verify-version`、`node-ci.yml` 的 `e2e-paths` diff、`wait-for-checks`、`ci-ok`、`apt-install` 重试与超时），`maturin_test_guard_test.py`（`maturin-wheels.yml` 的 `test` 条件；禁止表达式与裸 `true` / `false` 比较），以及 `go_cache_test.sh`（`go-ci.yml` 构建缓存的 Mark / Trim 和 `-coverpkg` 覆盖率合并，需要本机有 Go） |
 | `tests/fixtures/` | 自测用的最小 Rust / Python / Go / npm / bun / Docker 项目 |
 | `CHANGELOG.md` | 每个 `v1.x.y` 一节 |
 
@@ -32,6 +32,7 @@ bash tests/apt_install_test.sh
 bash tests/verify_version_test.sh
 bash tests/node_e2e_paths_test.sh
 bash tests/wait_for_checks_test.sh
+bash tests/ci_ok_test.sh
 bash tests/go_cache_test.sh   # 需要 Go（自测里由 setup-go 按 go-min fixture 安装）
 ```
 

@@ -64,6 +64,8 @@ jobs:
         run: bash tests/verify_version_test.sh
       - name: wait-for-checks only passes a succeeded check; timeout-minutes 0 looks once
         run: bash tests/wait_for_checks_test.sh
+      - name: ci-ok fails on failed / cancelled needs and on cancelled legs that needs hides
+        run: bash tests/ci_ok_test.sh
       - name: maturin-wheels smoke-test guard and loose boolean comparisons
         run: python3 tests/maturin_test_guard_test.py
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -553,6 +555,17 @@ jobs:
       - maturin-test-guard
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # actions: read lets actions/ci-ok list this run's jobs: a macOS leg that GitHub cancels for
+    # lack of a runner can leave needs.<id>.result green, and only the jobs API shows it.
+    permissions:
+      actions: read
+      contents: read
     steps:
-      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
-        run: exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # ./ (this commit), not @v1: the aggregate check is the one place the self-test can use the
+      # action under review directly.
+      - uses: ./actions/ci-ok
+        with:
+          needs: ${{ toJSON(needs) }}
