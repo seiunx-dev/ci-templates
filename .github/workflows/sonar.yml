@@ -97,7 +97,7 @@ jobs:
           persist-credentials: false
       - name: Download coverage
         if: steps.token.outputs.present == 'true' && inputs.coverage-pattern != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: ${{ inputs.coverage-pattern }}
           path: coverage
@@ -219,7 +219,7 @@ jobs:
           print("coverage files:", ", ".join(sorted(p.name for p in cov.iterdir())) if cov.is_dir() else "none")
       - name: SonarQube scan
         if: steps.token.outputs.present == 'true'
-        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
