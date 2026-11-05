@@ -9,6 +9,11 @@
 # - Optional Postgres/Redis services (Linux runners only). Without services and container the
 #   job has no `services:`/`container:` keys at all, so the same template runs on Windows/macOS.
 #   Tests get CI_POSTGRES_URL / CI_REDIS_URL; map them onto your own variable names via `env`.
+# - Fewer billed jobs for private repos (all opt-in): `actionlint: true` runs actionlint as a step
+#   of the job that lints (no separate Workflow lint job); `combined: true` runs fmt/clippy/extra
+#   lint in the Test job instead of a separate Lint job (one checkout/toolchain setup, one rounded
+#   minute less, but lint and tests no longer run in parallel). `debuginfo: line-tables-only`
+#   builds the tests with less debuginfo (CARGO_PROFILE_{DEV,TEST}_DEBUG).
 #
 # Caller example:
 #   jobs:
@@ -139,6 +144,34 @@ on:
         description: Runner label.
         type: string
         default: ubuntu-latest
+      combined:
+        description: >-
+          Run fmt, clippy and extra-lint-command in the Test job, before the tests, instead of a
+          separate Lint job (the Test job keeps its name). Saves one job (checkout, toolchain,
+          cache restore and the per-job minute rounding of private repos) at the cost of lint/test
+          parallelism. The job uses test-timeout-minutes and the rust-cache key
+          <cache-key-prefix>-combined-test (or -combined-coverage).
+        type: boolean
+        default: false
+      actionlint:
+        description: >-
+          Run actionlint (+ shellcheck when it is on PATH) on the repository's workflows as a step of
+          the job that lints: Lint, or the Test job when combined is true or lint is false. Replaces a
+          separate actionlint.yml job. Linux and macOS runners only.
+        type: boolean
+        default: false
+      actionlint-version:
+        description: actionlint release used when actionlint is true (same default as actionlint.yml).
+        type: string
+        default: 1.7.12
+      debuginfo:
+        description: >-
+          Debuginfo level for test builds, exported as CARGO_PROFILE_DEV_DEBUG and
+          CARGO_PROFILE_TEST_DEBUG in the Test job (e.g. line-tables-only: panics and backtraces
+          keep file:line, compile and link get faster). Empty = the project's profile settings.
+          Variables in `env` override it.
+        type: string
+        default: ""
       lint-timeout-minutes:
         type: number
         default: 20
@@ -157,9 +190,15 @@ env:
 jobs:
   lint:
     name: Lint
-    if: inputs.lint && inputs.container == ''
+    if: inputs.lint && !inputs.combined && inputs.container == ''
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.lint-timeout-minutes }}
+    env: &lint-env
+      # Read by the step conditions shared with the Test job (see `combined`). Keep the CI_TPL_
+      # prefix: Swatinem/rust-cache hashes every env var starting with CARGO, CC, CFLAGS, CXX,
+      # CMAKE or RUST into its cache key, so a RUST_* name here would change every caller's key.
+      CI_TPL_LINT: "true"
+      CI_TPL_ACTIONLINT: ${{ inputs.actionlint }}
     steps: &lint-steps
       - name: Install base packages (container)
         if: inputs.container != ''
@@ -170,6 +209,49 @@ jobs:
         with:
           submodules: ${{ inputs.submodules }}
           persist-credentials: false
+      # Same install as actionlint.yml (release binary + checksum), as a step so private repos do
+      # not pay a rounded minute for a separate job. Runs from the repository root.
+      - &actionlint-install
+        name: Install actionlint
+        if: env.CI_TPL_ACTIONLINT == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ inputs.actionlint-version }}
+        run: |
+          set -euo pipefail
+          case "$(uname -s)" in
+            Linux) os=linux ;;
+            Darwin) os=darwin ;;
+            *) echo "::error::actionlint: true needs a Linux or macOS runner (got $(uname -s))"; exit 1 ;;
+          esac
+          case "$(uname -m)" in
+            x86_64) arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "::error::unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
+          base="https://github.com/rhysd/actionlint/releases/download/v${VERSION}"
+          file="actionlint_${VERSION}_${os}_${arch}.tar.gz"
+          dir="$RUNNER_TEMP/actionlint"; mkdir -p "$dir"; cd "$dir"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$file" "$base/$file"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o checksums.txt "$base/actionlint_${VERSION}_checksums.txt"
+          if command -v sha256sum > /dev/null; then sum=(sha256sum); else sum=(shasum -a 256); fi
+          grep " ${file}\$" checksums.txt | "${sum[@]}" -c -
+          tar -xzf "$file" actionlint
+          echo "$dir" >> "$GITHUB_PATH"
+      - &actionlint-run
+        name: actionlint
+        if: env.CI_TPL_ACTIONLINT == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"  # the repository root, also in container mode
+          if command -v shellcheck > /dev/null; then
+            shellcheck --version
+          else
+            echo "::warning::shellcheck is not on PATH, so run: blocks are not checked (add shellcheck to apt-packages in container mode)"
+          fi
+          actionlint -version
+          actionlint -color
       - uses: seiunx-dev/ci-templates/actions/apt-install@v1
         with:
           packages: ${{ inputs.apt-packages }}
@@ -207,8 +289,9 @@ jobs:
         if: inputs.setup-command != ''
         shell: bash
         run: ${{ inputs.setup-command }}
-      - name: cargo fmt --check
-        if: inputs.fmt
+      - &fmt-step
+        name: cargo fmt --check
+        if: env.CI_TPL_LINT == 'true' && inputs.fmt
         shell: bash
         env:
           MAIN: ${{ inputs.working-directory }}
@@ -218,7 +301,9 @@ jobs:
           for dir in "$MAIN" $EXTRA; do
             echo "::group::fmt $dir"; (cd "$dir" && cargo fmt --all -- --check); echo "::endgroup::"
           done
-      - name: cargo clippy -D warnings
+      - &clippy-step
+        name: cargo clippy -D warnings
+        if: env.CI_TPL_LINT == 'true'
         shell: bash
         env:
           MAIN: ${{ inputs.working-directory }}
@@ -239,28 +324,35 @@ jobs:
           for dir in $EXTRA; do
             echo "::group::clippy $dir"; (cd "$dir" && cargo clippy --locked --all-targets -- -D warnings); echo "::endgroup::"
           done
-      - name: Extra lint
-        if: inputs.extra-lint-command != ''
+      - &extra-lint-step
+        name: Extra lint
+        if: env.CI_TPL_LINT == 'true' && inputs.extra-lint-command != ''
         shell: bash
         working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.extra-lint-command }}
 
   lint-container:
     name: Lint
-    if: inputs.lint && inputs.container != ''
+    if: inputs.lint && !inputs.combined && inputs.container != ''
     runs-on: ${{ inputs.runs-on }}
     container: ${{ inputs.container }}
     timeout-minutes: ${{ inputs.lint-timeout-minutes }}
+    env: *lint-env
     steps: *lint-steps
 
   # Two variants of the same test job (and of lint above). Service containers and `container:` only work on
   # Linux runners, so the plain variant (no services, no container) is the one that runs on
-  # Windows/macOS; the steps are shared through a YAML anchor.
+  # Windows/macOS; the steps are shared through a YAML anchor. With `combined: true` the lint
+  # steps (the same step definitions as in Lint, through YAML aliases) run here too.
   test:
     name: Test
     if: inputs.postgres-image == '' && inputs.redis-image == '' && inputs.container == ''
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.test-timeout-minutes }}
+    env: &test-env
+      # CI_TPL_ prefix on purpose (not hashed by rust-cache, see the Lint job).
+      CI_TPL_LINT: ${{ inputs.combined && inputs.lint }}
+      CI_TPL_ACTIONLINT: ${{ inputs.actionlint && (inputs.combined || !inputs.lint) }}
     steps: &test-steps
       - name: Install base packages (container)
         if: inputs.container != ''
@@ -271,6 +363,8 @@ jobs:
         with:
           submodules: ${{ inputs.submodules }}
           persist-credentials: false
+      - *actionlint-install
+      - *actionlint-run
       - uses: seiunx-dev/ci-templates/actions/apt-install@v1
         with:
           packages: ${{ inputs.apt-packages }}
@@ -279,7 +373,15 @@ jobs:
         env:
           LINES: ${{ inputs.env }}
           IN_CONTAINER: ${{ inputs.container != '' }}
+          DEBUGINFO: ${{ inputs.debuginfo }}
         run: |
+          if [ -n "$DEBUGINFO" ]; then
+            case "$DEBUGINFO" in
+              0|1|2|false|true|none|line-directives-only|line-tables-only|limited|full) ;;
+              *) echo "::error::debuginfo: '$DEBUGINFO' is not a cargo debug level"; exit 1 ;;
+            esac
+            { echo "CARGO_PROFILE_DEV_DEBUG=$DEBUGINFO"; echo "CARGO_PROFILE_TEST_DEBUG=$DEBUGINFO"; } >> "$GITHUB_ENV"
+          fi
           pg_host=localhost; redis_host=localhost
           if [ "$IN_CONTAINER" = true ]; then pg_host=postgres; redis_host=redis; fi
           pg="postgres://postgres:postgres@${pg_host}:5432/test"
@@ -307,10 +409,15 @@ jobs:
       - uses: seiunx-dev/ci-templates/actions/setup-rust@v1
         with:
           toolchain: ${{ inputs.toolchain }}
-          components: ${{ inputs.coverage && 'llvm-tools-preview' || '' }}
+          # Without combined these evaluate exactly as before: '' / llvm-tools-preview and
+          # <prefix>-test / <prefix>-coverage.
+          components: >-
+            ${{ env.CI_TPL_LINT == 'true'
+            && (inputs.coverage && 'rustfmt,clippy,llvm-tools-preview' || 'rustfmt,clippy')
+            || (inputs.coverage && 'llvm-tools-preview' || '') }}
           targets: ${{ inputs.targets }}
           working-directory: ${{ inputs.working-directory }}
-          cache-key: ${{ inputs.cache-key-prefix }}-${{ inputs.coverage && 'coverage' || 'test' }}
+          cache-key: ${{ inputs.cache-key-prefix }}-${{ env.CI_TPL_LINT == 'true' && 'combined-' || '' }}${{ inputs.coverage && 'coverage' || 'test' }}
           cache-workspaces: ${{ steps.ws.outputs.list }}
       - name: Install cargo-llvm-cov
         if: inputs.coverage
@@ -322,6 +429,9 @@ jobs:
         if: inputs.setup-command != ''
         shell: bash
         run: ${{ inputs.setup-command }}
+      - *fmt-step
+      - *clippy-step
+      - *extra-lint-step
       - name: Tests
         shell: bash
         working-directory: ${{ inputs.working-directory }}
@@ -390,6 +500,7 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     container: ${{ inputs.container }}
     timeout-minutes: ${{ inputs.test-timeout-minutes }}
+    env: *test-env
     services:
       postgres:
         image: ${{ inputs.postgres-image }}

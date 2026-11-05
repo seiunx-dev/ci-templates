@@ -3,6 +3,11 @@
 # optional python-version matrix, services, and coverage upload. Optionally builds the
 # sdist/wheel (`uv build`) and uploads it as an artifact for a caller-side PyPI publish
 # job (PyPI trusted publishing does not work from inside a reusable workflow).
+#
+# Fewer billed jobs for private repos (opt-in): `combined: true` runs the lint steps (and
+# build-dist, from the clean checkout before anything else touches the tree) in the first test
+# leg instead of a separate Lint job; `actionlint: true` runs
+# actionlint as a step of the job that lints instead of a separate actionlint.yml job.
 name: Python CI
 
 on:
@@ -64,6 +69,26 @@ on:
         description: Run `uv build` and upload dist/ as artifact `dist` (retention 3 days).
         type: boolean
         default: false
+      combined:
+        description: >-
+          Run ruff, lint-command and build-dist in the first test leg (the first python-versions
+          entry; build-dist right after setup-uv on the clean checkout, ruff and lint-command after
+          uv sync) instead of a separate Lint job. Saves one job; lint-command then
+          sees the test job's env, services and downloaded artifact. Ignored when test-command is
+          empty (the Lint job runs as usual).
+        type: boolean
+        default: false
+      actionlint:
+        description: >-
+          Run actionlint (+ shellcheck) on the repository's workflows as a step of the job that lints
+          (Lint, or the first test leg when combined is true) instead of a separate actionlint.yml
+          job. Linux and macOS runners only.
+        type: boolean
+        default: false
+      actionlint-version:
+        description: actionlint release used when actionlint is true (same default as actionlint.yml).
+        type: string
+        default: 1.7.12
       runs-on:
         type: string
         default: ubuntu-latest
@@ -77,8 +102,14 @@ permissions:
 jobs:
   lint:
     name: Lint
+    if: ${{ !inputs.combined || inputs.test-command == '' }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    env:
+      # Read by the step conditions shared with the test job (see `combined`). Same names as in
+      # rust-ci (CI_TPL_ prefix, which no cache action hashes into its key).
+      CI_TPL_LINT: "true"
+      CI_TPL_ACTIONLINT: ${{ inputs.actionlint }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -86,14 +117,58 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Same install as actionlint.yml (release binary + checksum), as a step so private repos do
+      # not pay a rounded minute for a separate job. Runs from the repository root.
+      - &actionlint-install
+        name: Install actionlint
+        if: env.CI_TPL_ACTIONLINT == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ inputs.actionlint-version }}
+        run: |
+          set -euo pipefail
+          case "$(uname -s)" in
+            Linux) os=linux ;;
+            Darwin) os=darwin ;;
+            *) echo "::error::actionlint: true needs a Linux or macOS runner (got $(uname -s))"; exit 1 ;;
+          esac
+          case "$(uname -m)" in
+            x86_64) arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "::error::unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
+          base="https://github.com/rhysd/actionlint/releases/download/v${VERSION}"
+          file="actionlint_${VERSION}_${os}_${arch}.tar.gz"
+          dir="$RUNNER_TEMP/actionlint"; mkdir -p "$dir"; cd "$dir"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$file" "$base/$file"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o checksums.txt "$base/actionlint_${VERSION}_checksums.txt"
+          if command -v sha256sum > /dev/null; then sum=(sha256sum); else sum=(shasum -a 256); fi
+          grep " ${file}\$" checksums.txt | "${sum[@]}" -c -
+          tar -xzf "$file" actionlint
+          echo "$dir" >> "$GITHUB_PATH"
+      - &actionlint-run
+        name: actionlint
+        if: env.CI_TPL_ACTIONLINT == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"  # the repository root, not working-directory
+          if command -v shellcheck > /dev/null; then
+            shellcheck --version
+          else
+            echo "::warning::shellcheck is not on PATH, so run: blocks are not checked"
+          fi
+          actionlint -version
+          actionlint -color
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: ${{ inputs.uv-version }}
           working-directory: ${{ inputs.working-directory }}
           enable-cache: true
           save-cache: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-      - name: ruff
-        if: inputs.ruff
+      - &ruff-step
+        name: ruff
+        if: env.CI_TPL_LINT == 'true' && inputs.ruff
         run: |
           # The project's locked ruff when uv.lock has one, run via uvx so it does not depend
           # on which extra or dependency group pulls ruff in (`uv run` would only sync the
@@ -110,19 +185,22 @@ jobs:
           echo "ruff: ${ver:-latest}"
           $ruff check --output-format=github .
           $ruff format --check .
-      - name: Extra lint
-        if: inputs.lint-command != ''
+      - &extra-lint-step
+        name: Extra lint
+        if: env.CI_TPL_LINT == 'true' && inputs.lint-command != ''
         env:
           SYNC_ARGS: ${{ inputs.sync-args }}
         run: |
           # shellcheck disable=SC2086
           uv sync $SYNC_ARGS
           ${{ inputs.lint-command }}
-      - name: Build sdist and wheel
-        if: inputs.build-dist
+      - &build-dist-step
+        name: Build sdist and wheel
+        if: env.CI_TPL_LINT == 'true' && inputs.build-dist
         run: uv build
-      - name: Upload dist
-        if: inputs.build-dist
+      - &upload-dist-step
+        name: Upload dist
+        if: env.CI_TPL_LINT == 'true' && inputs.build-dist
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
@@ -139,6 +217,10 @@ jobs:
       fail-fast: false
       matrix:
         python: ${{ fromJSON(inputs.python-versions) }}
+    env:
+      # Without combined both are false, so the aliased lint steps below are skipped.
+      CI_TPL_LINT: ${{ inputs.combined && strategy.job-index == 0 }}
+      CI_TPL_ACTIONLINT: ${{ inputs.actionlint && inputs.combined && strategy.job-index == 0 }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -165,6 +247,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - *actionlint-install
+      - *actionlint-run
       - uses: seiunx-dev/ci-templates/actions/apt-install@v1
         with:
           packages: ${{ inputs.apt-packages }}
@@ -175,6 +259,11 @@ jobs:
           working-directory: ${{ inputs.working-directory }}
           enable-cache: true
           save-cache: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      # Build dist before the downloaded artifact, setup-command, uv sync and the tests write
+      # into the tree, so the sdist/wheel come from the same clean checkout as in the Lint job
+      # (VCS-based backends package every file that is not gitignored).
+      - *build-dist-step
+      - *upload-dist-step
       - name: Download artifact
         if: inputs.download-artifact != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -200,6 +289,8 @@ jobs:
         run: |
           # shellcheck disable=SC2086
           uv sync $SYNC_ARGS
+      - *ruff-step
+      - *extra-lint-step
       - name: Setup hook
         if: inputs.setup-command != ''
         run: ${{ inputs.setup-command }}
