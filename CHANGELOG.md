@@ -2,6 +2,10 @@
 
 本仓库按 [版本策略](README.md#版本策略) 发布：`v1.x.y` 不可变，`v1` 跟随最新的 `v1.x.y`。
 
+## v1.1.14 — 2026-11-18
+
+- `actions/setup-rust`：升级 `Swatinem/rust-cache` 至 v2.9.3，修复缓存清理扫描打包产物的 `tests` 目录时产生的 ENOENT 错误。
+
 ## v1.1.13 — 2026-11-08
 
 - 新增 composite action `actions/ci-ok`，用作调用方 `CI OK` 聚合 job 的检查步骤（opt-in，调用方改用之前行为不变；模板工作流本身没有改动）。它保留原来的 needs 判断（needs 里有 `failure` / `cancelled` 就失败），另外通过 jobs API 读本次 run 每个 job 最新一次 attempt 的结论：已结束的 job 有 `failure`、`cancelled`、`timed_out`、`startup_failure` 或 `action_required` 时也失败；`skipped` / `neutral` 视为通过，尚未结束的 job（`CI OK` 自己、`docker-tags`）不看。原因：可复用工作流里的 job 因为没有 runner 接（"The job was not acquired by Runner"）被取消时，调用方 job 的 `needs.<id>.result` 可能仍是 `success`，只看 needs 的 `CI OK` 会在这个 leg 根本没跑的情况下变绿（自测 run 41875681594、41876550379、41882207914 的 macOS leg）。`ignore-jobs` 按 bash 模式放过指定 job（只作用于 run 范围的检查，needs 里的 job 失败一律不放过）。`CI OK` job 需要 `actions: read`（私有仓库必需）；API 调用失败重试 2 次后报错并提示加权限。README 的调用示例和 "唯一的 required check" 约定改用这个 action。新增 `tests/ci_ok_test.sh`。（#25）
